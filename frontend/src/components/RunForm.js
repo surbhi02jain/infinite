@@ -24,7 +24,10 @@ const PRESETS = [
     prd: "Dashboard shows account balance. Transfers validate sufficient funds. Negative amounts blocked. 2FA on large transfers." },
 ];
 
-const MODELS = ["sarvam-105b", "sarvam-105b-conversations", "glm5.2", "gemma4", "deepseekv4-flash"];
+// Only Sarvam AI model ids verified to actually respond (200) from api.sarvam.ai — others in this
+// account return 400 Bad Request on every call, which would silently degrade that agent to its
+// deterministic fallback for the whole run. Re-verify before adding one back.
+const MODELS = ["sarvam-105b", "sarvam-105b-conversations"];
 const AGENTS = [["planner", "Planner"], ["evaluator", "Evaluator"], ["generator", "Generator"], ["healer", "Healer"]];
 
 export default function RunForm({ onSubmit }) {

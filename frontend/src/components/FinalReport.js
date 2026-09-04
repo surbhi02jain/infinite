@@ -1,12 +1,47 @@
-import { Download, FileJson, FileCode2, RotateCw, ShieldAlert, Gauge, Target } from "lucide-react";
+import { useEffect, useState } from "react";
+import { motion } from "framer-motion";
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RTooltip } from "recharts";
+import { FileJson, FileCode2, ShieldAlert, Gauge, Target, PieChart as PieIcon } from "lucide-react";
 import { toast } from "sonner";
 import { API } from "@/api";
 import { Empty } from "@/components/TestPlanView";
 import { Button } from "@/components/ui/button";
 
-export default function FinalReport({ report, runId }) {
+const BREAKDOWN_COLORS = { Passed: "#34d399", "Self-Healed": "#fbbf24", Defects: "#fb7185", "Needs Review": "#94a3b8" };
+
+function useCountUp(target, duration = 700) {
+  const [val, setVal] = useState(0);
+  useEffect(() => {
+    const to = Number(target) || 0;
+    let raf;
+    const start = performance.now();
+    function tick(now) {
+      const t = Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - t, 3);
+      setVal(Math.round(to * eased));
+      if (t < 1) raf = requestAnimationFrame(tick);
+    }
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [target, duration]);
+  return val;
+}
+
+function MetricCard({ k, v, suffix, cls }) {
+  const animated = useCountUp(v);
+  return (
+    <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}
+      data-testid={`metric-${k.toLowerCase().replace(/ /g, "-")}`} className="rounded-xl border border-slate-800 bg-[#0b111c] p-4">
+      <div className={`font-heading text-3xl font-bold ${cls}`}>{animated}{suffix || ""}</div>
+      <div className="font-mono text-[10px] uppercase tracking-widest text-slate-500 mt-1">{k}</div>
+    </motion.div>
+  );
+}
+
+export default function FinalReport({ report, runId, run }) {
   if (!report) return <Empty text="Final quality report generates at the end of the pipeline…" />;
   const s = report.summary || {};
+  const hadPrd = Boolean(run?.config?.prd);
 
   const exportReport = async (fmt) => {
     try {
@@ -19,7 +54,7 @@ export default function FinalReport({ report, runId }) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `autoqa-${runId.slice(0, 8)}.${fmt}`;
+      a.download = `qalchemist-${runId.slice(0, 8)}.${fmt}`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -31,13 +66,21 @@ export default function FinalReport({ report, runId }) {
   };
 
   const metrics = [
-    { k: "Pass Rate", v: `${s.pass_rate}%`, cls: "text-emerald-400" },
+    { k: "Pass Rate", v: s.pass_rate, suffix: "%", cls: "text-emerald-400" },
     { k: "Total Flows", v: s.total_flows, cls: "text-slate-100" },
     { k: "Passed", v: s.passed, cls: "text-emerald-400" },
     { k: "Self-Healed", v: s.healed, cls: "text-amber-300" },
     { k: "Defects", v: s.defects, cls: "text-rose-400" },
     { k: "Needs Review", v: s.needs_review, cls: "text-slate-300" },
+    { k: "Coverage Gaps", v: s.coverage_gaps, cls: "text-cyan-400" },
   ];
+
+  const breakdown = [
+    { name: "Passed", value: s.passed || 0 },
+    { name: "Self-Healed", value: s.healed || 0 },
+    { name: "Defects", value: s.defects || 0 },
+    { name: "Needs Review", value: s.needs_review || 0 },
+  ].filter((d) => d.value > 0);
 
   return (
     <div className="space-y-6 max-w-5xl">
@@ -59,17 +102,12 @@ export default function FinalReport({ report, runId }) {
       </div>
 
       {/* metric bento */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-        {metrics.map((m) => (
-          <div key={m.k} data-testid={`metric-${m.k.toLowerCase().replace(/ /g, "-")}`} className="rounded-xl border border-slate-800 bg-[#0b111c] p-4">
-            <div className={`font-heading text-3xl font-bold ${m.cls}`}>{m.v}</div>
-            <div className="font-mono text-[10px] uppercase tracking-widest text-slate-500 mt-1">{m.k}</div>
-          </div>
-        ))}
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+        {metrics.map((m) => <MetricCard key={m.k} {...m} />)}
       </div>
 
-      {/* risk index */}
-      <div className="grid md:grid-cols-2 gap-4">
+      {/* risk index / breakdown / prd */}
+      <div className="grid md:grid-cols-3 gap-4">
         <div className="rounded-xl border border-slate-800 bg-[#0b111c] p-5">
           <div className="flex items-center gap-2 mb-3"><Gauge className="w-4 h-4 text-cyan-400" /><span className="font-heading text-sm font-semibold text-slate-200">Untested-Flow Risk Index</span></div>
           <div className="flex items-end gap-3">
@@ -77,9 +115,39 @@ export default function FinalReport({ report, runId }) {
             <span className="text-slate-500 text-sm mb-1.5">/ 100</span>
           </div>
           <div className="mt-3 h-2 rounded-full bg-slate-800 overflow-hidden">
-            <div className={`h-full ${riskBar(s.untested_risk_index)}`} style={{ width: `${s.untested_risk_index}%` }} />
+            <motion.div initial={{ width: 0 }} animate={{ width: `${s.untested_risk_index}%` }} transition={{ duration: 0.6, ease: "easeOut" }}
+              className={`h-full ${riskBar(s.untested_risk_index)}`} />
           </div>
           <p className="mt-2 text-[12px] text-slate-500">Derived from {s.coverage_gaps} coverage gaps, {s.defects} defects & {s.needs_review} unresolved items.</p>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-[#0b111c] p-5">
+          <div className="flex items-center gap-2 mb-3"><PieIcon className="w-4 h-4 text-emerald-400" /><span className="font-heading text-sm font-semibold text-slate-200">Execution Breakdown</span></div>
+          {breakdown.length ? (
+            <div className="flex items-center gap-4">
+              <div className="w-24 h-24 shrink-0">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie data={breakdown} dataKey="value" nameKey="name" innerRadius={28} outerRadius={44}
+                      paddingAngle={breakdown.length > 1 ? 3 : 0} isAnimationActive animationDuration={700} stroke="none">
+                      {breakdown.map((d) => <Cell key={d.name} fill={BREAKDOWN_COLORS[d.name]} />)}
+                    </Pie>
+                    <RTooltip contentStyle={{ background: "#0d131f", border: "1px solid #1e293b", borderRadius: 8, fontSize: 11 }}
+                      itemStyle={{ color: "#e2e8f0" }} />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="space-y-1.5 min-w-0">
+                {breakdown.map((d) => (
+                  <div key={d.name} className="flex items-center gap-2 text-[12px]">
+                    <span className="w-2 h-2 rounded-full shrink-0" style={{ background: BREAKDOWN_COLORS[d.name] }} />
+                    <span className="text-slate-400 truncate">{d.name}</span>
+                    <span className="text-slate-200 font-mono ml-auto">{d.value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : <p className="text-[13px] text-slate-500">No executions recorded.</p>}
         </div>
 
         <div className="rounded-xl border border-slate-800 bg-[#0b111c] p-5">
@@ -88,7 +156,11 @@ export default function FinalReport({ report, runId }) {
             <div className="space-y-1.5">
               {report.prd_gaps.map((p, i) => <div key={i} className="text-[12px] text-violet-200 flex gap-2"><span className="text-violet-500">▸</span>{p}</div>)}
             </div>
-          ) : <p className="text-[13px] text-emerald-400">✓ No PRD requirements missed by the plan.</p>}
+          ) : hadPrd ? (
+            <p className="text-[13px] text-emerald-400">✓ No PRD requirements missed by the plan.</p>
+          ) : (
+            <p className="text-[13px] text-slate-500">No PRD was submitted for this run — nothing to check coverage against.</p>
+          )}
         </div>
       </div>
 

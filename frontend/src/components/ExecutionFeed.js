@@ -1,5 +1,7 @@
-import { CheckCircle2, XCircle, Wrench, HelpCircle, Cpu, Film, FileArchive, ChevronRight } from "lucide-react";
+import { useState } from "react";
+import { CheckCircle2, XCircle, Wrench, HelpCircle, Cpu, Film, FileArchive, ChevronRight, ExternalLink } from "lucide-react";
 import { Empty, SectionHeader } from "@/components/TestPlanView";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { ARTIFACT_BASE } from "@/api";
 
 const FINAL = {
@@ -11,6 +13,7 @@ const FINAL = {
 };
 
 export default function ExecutionFeed({ executions }) {
+  const [lightbox, setLightbox] = useState(null);
   if (!executions.length) return <Empty text="Live pass/fail feed streams here as workers run…" />;
   return (
     <div className="space-y-3 max-w-4xl">
@@ -25,10 +28,12 @@ export default function ExecutionFeed({ executions }) {
             className={`rounded-xl border p-4 ${meta.cls}`}>
             <div className="flex items-start gap-4">
               {shot && (
-                <a href={`${ARTIFACT_BASE}${shot}`} target="_blank" rel="noreferrer" className="shrink-0">
+                <button type="button" data-testid={`execution-screenshot-${e.flow_id}`}
+                  onClick={() => setLightbox({ url: `${ARTIFACT_BASE}${shot}`, name: e.flow_name })}
+                  className="shrink-0">
                   <img src={`${ARTIFACT_BASE}${shot}`} alt="" loading="lazy"
-                    className="w-24 h-16 object-cover object-top rounded-lg border border-slate-700 bg-black hover:border-slate-500 transition-colors" />
-                </a>
+                    className="w-24 h-16 object-cover object-top rounded-lg border border-slate-700 bg-black hover:border-slate-500 transition-colors cursor-zoom-in" />
+                </button>
               )}
               <div className="flex-1 min-w-0">
                 <div className="flex items-center justify-between gap-3">
@@ -74,6 +79,24 @@ export default function ExecutionFeed({ executions }) {
           </div>
         );
       })}
+
+      <Dialog open={Boolean(lightbox)} onOpenChange={(open) => !open && setLightbox(null)}>
+        <DialogContent className="max-w-3xl bg-[#0b111c] border-slate-800 text-slate-100 p-4">
+          <DialogTitle className="text-sm font-heading flex items-center justify-between gap-3 pr-6">
+            <span className="truncate">{lightbox?.name}</span>
+            {lightbox && (
+              <a href={lightbox.url} target="_blank" rel="noreferrer"
+                className="shrink-0 flex items-center gap-1 text-[11px] font-mono font-normal text-slate-400 hover:text-emerald-400">
+                <ExternalLink className="w-3 h-3" /> open original
+              </a>
+            )}
+          </DialogTitle>
+          {lightbox && (
+            <img src={lightbox.url} alt={lightbox.name}
+              className="w-full rounded-lg border border-slate-800 bg-black" />
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

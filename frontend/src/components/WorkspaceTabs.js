@@ -7,10 +7,10 @@ import ExecutionFeed from "@/components/ExecutionFeed";
 import HealerLog from "@/components/HealerLog";
 import FinalReport from "@/components/FinalReport";
 
-export default function WorkspaceTabs({ derived, runId, run }) {
+export default function WorkspaceTabs({ derived, runId, run, activeTab, onTabChange }) {
   const badge = (n) => n > 0 ? <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-slate-700/60 text-[9px] font-mono">{n}</span> : null;
   return (
-    <Tabs defaultValue="plan" className="flex-1 flex flex-col overflow-hidden">
+    <Tabs value={activeTab} onValueChange={onTabChange} className="flex-1 flex flex-col overflow-hidden">
       <TabsList className="h-11 justify-start bg-[#0b101c] border-b border-slate-800/80 rounded-none px-3 gap-1 shrink-0 w-full">
         <TabsTrigger data-testid="test-plan-tab-trigger" value="plan" className="data-[state=active]:bg-slate-800 data-[state=active]:text-white text-slate-400 text-xs">
           <ListChecks className="w-3.5 h-3.5 mr-1.5" /> Plan {badge(derived.flows.length)}

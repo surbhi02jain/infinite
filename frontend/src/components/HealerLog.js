@@ -48,7 +48,13 @@ export default function HealerLog({ healer }) {
             )}
 
             <p className="text-[13px] text-slate-300 leading-relaxed">{a.rationale}</p>
-            {a.result && <p className="mt-2 text-[12px] text-emerald-300 font-mono">✓ {a.result}</p>}
+            {a.result && (
+              a.decision === "script" ? (
+                <p className="mt-2 text-[12px] text-emerald-300 font-mono">✓ {a.result}</p>
+              ) : (
+                <p className="mt-2 text-[12px] text-amber-300 font-mono">⚠ {a.result}</p>
+              )
+            )}
           </div>
         );
       })}
