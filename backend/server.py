@@ -5,7 +5,7 @@ import uuid
 import asyncio
 import logging
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict
 
 from fastapi import FastAPI, APIRouter, HTTPException, Request
@@ -185,9 +185,13 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def reconcile_orphans():
-    # runs left mid-flight by a restart can never resume (in-memory control lost) -> mark failed
+    # A run mid-flight when ITS OWN process restarts can never resume (in-memory control lost)
+    # -> mark failed. But `updated_at` is refreshed on every stage transition, so a run still being
+    # actively driven by a different, still-alive process (e.g. another backend instance sharing
+    # this DB) looks recent and must not be swept up just because *this* process is starting.
+    stale_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat()
     res = await db.runs.update_many(
-        {"status": {"$in": ["running", "queued", "paused"]}},
+        {"status": {"$in": ["running", "queued", "paused"]}, "updated_at": {"$lt": stale_cutoff}},
         {"$set": {"status": "failed", "error": "interrupted by backend restart"}})
     if res.modified_count:
         logger.info(f"Reconciled {res.modified_count} orphaned run(s) on startup.")

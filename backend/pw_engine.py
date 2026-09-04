@@ -186,33 +186,64 @@ def _keywords(step_text: str) -> str:
     while prev != t:
         prev = t
         t = _STOPWORDS.sub("", t.strip())
-    return t.strip() or step_text.strip()
+    t = t.strip().strip("'\"")  # LLM-authored steps often quote the target, e.g. "Click the 'Login' button"
+    return t or step_text.strip()
 
 
-async def _find_clickable(page, step_text, spec_selectors):
+async def _find_clickable(page, step_text, spec_selectors, timeout_ms=3000):
+    """Tries each candidate locator with a real wait (matching Playwright's own auto-waiting), rather
+    than an instant .count() snapshot — dynamic content (async data, animations, hydration) needs a
+    moment to render, and giving up instantly both false-fails flows and produces near-empty videos."""
     kw = _keywords(step_text)
+    candidates = []
     for sel in spec_selectors or []:
         try:
-            loc = _locator_from_string(page, sel)
-            if await loc.count() > 0:
-                return loc.first, sel
+            candidates.append((_locator_from_string(page, sel), sel))
         except Exception:
             continue
     if kw:
         for role in ("button", "link"):
-            try:
-                loc = page.get_by_role(role, name=re.compile(re.escape(kw), re.I))
-                if await loc.count() > 0:
-                    return loc.first, f"getByRole('{role}', name=/{kw}/i)"
-            except Exception:
-                pass
+            candidates.append((page.get_by_role(role, name=re.compile(re.escape(kw), re.I)),
+                               f"getByRole('{role}', name=/{kw}/i)"))
+        candidates.append((page.get_by_text(re.compile(re.escape(kw), re.I)), f"getByText(/{kw}/i)"))
+    for loc, desc in candidates:
         try:
-            loc = page.get_by_text(re.compile(re.escape(kw), re.I))
-            if await loc.count() > 0:
-                return loc.first, f"getByText(/{kw}/i)"
+            await loc.first.wait_for(state="visible", timeout=timeout_ms)
+            return loc.first, desc
         except Exception:
-            pass
+            continue
     return None, None
+
+
+_QUOTED_RE = re.compile(r"'([^']*)'|\"([^\"]*)\"")
+
+
+async def _fill_targeted(page, step_text):
+    """Fills the ONE field a step clearly names (e.g. "Enter 'tomsmith' in the username field"),
+    honoring any literal quoted value — falling back to type-based dummy data only when the step
+    gives no explicit value. Returns True if it found and filled a specific field, else False so the
+    caller can fall back to the generic multi-input fill."""
+    t = step_text.lower()
+    m = _QUOTED_RE.search(step_text)
+    value = (m.group(1) if m and m.group(1) is not None else (m.group(2) if m else None))
+
+    if "password" in t:
+        selector, kind = 'input[type="password"]', "password"
+    elif "email" in t:
+        selector, kind = 'input[type="email"]', "email"
+    elif "username" in t or "user name" in t or "login" in t:
+        selector, kind = 'input[type="text"], input[type="email"], input[name*="user" i]', "text"
+    else:
+        return False
+
+    loc = page.locator(selector).first
+    try:
+        await loc.wait_for(state="visible", timeout=3000)
+    except Exception:
+        return False
+    fill_value = value if value else DUMMY_VALUES.get(kind, DUMMY_VALUES["text"]).format(n=int(time.time()) % 10000)
+    await loc.fill(fill_value, timeout=3000)
+    return True
 
 
 async def _fill_visible_inputs(page, n_seed):
@@ -250,6 +281,8 @@ async def _execute_step(page, step_text, spec_selectors, base_url, prev_url):
             return await _execute_assert(page, t, step_text, base_url, prev_url)
 
         if any(k in t for k in ("fill", "enter", "type", "input")):
+            if await _fill_targeted(page, step_text):
+                return {"ok": True}
             filled = await _fill_visible_inputs(page, int(time.time()) % 10000)
             if not filled:
                 return {"ok": True, "note": "no empty inputs found to fill"}
@@ -273,6 +306,13 @@ async def _execute_step(page, step_text, spec_selectors, base_url, prev_url):
                 return {"ok": False, "fail_type": "selector-not-found",
                         "error": f"No element found matching step: '{step_text}'"}
             await loc.click(timeout=8000)
+            # a click can trigger navigation (e.g. a login/submit-style button not caught by the
+            # submit-keyword bucket above) — give it a moment to settle before the next step/assertion
+            # inspects the page, otherwise we'd be checking pre-navigation state.
+            try:
+                await page.wait_for_load_state("networkidle", timeout=4000)
+            except PWTimeoutError:
+                pass
             return {"ok": True}
 
         # unrecognized step type — treat as a soft no-op rather than a hard failure
@@ -304,6 +344,25 @@ async def _execute_assert(page, t, step_text, base_url, prev_url):
             if page.url != prev_url:
                 return {"ok": True}
             return {"ok": False, "fail_type": "assertion-failed", "error": f"URL did not change from {prev_url}"}
+
+        path_m = re.search(r"(/[\w\-/]+)\b", step_text)
+        if path_m and any(k in t for k in ("redirect", "navigat", "url", "should be on", "goes to")):
+            path = path_m.group(1)
+            if path in page.url:
+                return {"ok": True}
+            return {"ok": False, "fail_type": "assertion-failed",
+                    "error": f"Expected URL to contain '{path}', got '{page.url}'"}
+
+        # a quoted literal (e.g. "...with message 'You logged into a secure area!'") names an exact
+        # expected string — check for it directly rather than keyword-matching the surrounding prose,
+        # which mangles longer descriptive assertions into noisy, unmatchable phrases.
+        m = _QUOTED_RE.search(step_text)
+        literal = (m.group(1) if m and m.group(1) is not None else (m.group(2) if m else None))
+        if literal and len(literal) > 1:
+            body_text = (await page.locator("body").inner_text())[:5000]
+            if literal.lower() in body_text.lower():
+                return {"ok": True}
+            return {"ok": False, "fail_type": "assertion-failed", "error": f"Expected text '{literal}' not found on page"}
 
         if any(k in t for k in ("required", "validation", "error", "invalid")):
             body_text = (await page.locator("body").inner_text())[:3000].lower()
@@ -372,6 +431,9 @@ async def run_flow_pw(run_id, browser, storage_state_path, config, flow, spec, o
             shot_url = artifact_url(run_id, shot_name)
         except Exception:
             shot_url = None
+        # hold on the settled state briefly so the recorded video has a watchable frame per step,
+        # instead of the whole flow blurring past in well under a second on a fast/simple page
+        await page.wait_for_timeout(400)
         step_entry = {"index": i + 1, "description": step_text, "ok": result.get("ok", True),
                       "note": result.get("error") or result.get("note"), "screenshot_url": shot_url}
         steps_log.append(step_entry)

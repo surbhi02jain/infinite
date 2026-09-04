@@ -81,9 +81,13 @@ def test_event_types_persisted(completed_run):
     events = completed_run["events"]
     assert len(events) > 10
     types = {e["type"] for e in events}
-    for t in ["run_start", "stage_start", "stage_complete", "plan_flow", "gap", "spec",
-              "selector_check", "exec_result", "healer_action", "report", "run_complete"]:
+    # structurally guaranteed on every run regardless of what the real pipeline finds
+    for t in ["run_start", "stage_start", "stage_complete", "plan_flow", "spec",
+              "selector_check", "exec_result", "report", "run_complete"]:
         assert t in types, f"missing event type {t}"
+    # "gap" (EVALUATE found a coverage gap) and "healer_action" (RUN produced a real failure to
+    # triage) are data-dependent on the real audit/execution outcome — a thorough plan against a
+    # site that just works can legitimately produce neither, so they're not required here.
     # stage_start/complete for each stage
     for s in STAGES:
         assert any(e["type"] == "stage_start" and e["stage"] == s for e in events), s

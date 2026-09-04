@@ -109,6 +109,10 @@ class Orchestrator:
               "ts": now_iso(), "stage": stage, "agent": agent, "level": level,
               "type": etype, "message": message, "data": data or {}}
         await self.db.events.insert_one(dict(ev))
+        # keep `updated_at` fresh on every emission (not just stage transitions) so a run that's
+        # genuinely still active — e.g. mid-way through a slow LLM call inside a single long stage —
+        # isn't mistaken for an orphan by another process's startup reconciliation.
+        await self.db.runs.update_one({"id": run_id}, {"$set": {"updated_at": ev["ts"]}})
         ev.pop("_id", None)
         bus.publish(run_id, ev)
         return ev
@@ -351,7 +355,10 @@ class Orchestrator:
                 worker_slots.put_nowait(worker_id)
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            # slow_mo paces every real action (click/fill/goto) — a simple site can otherwise finish
+            # a whole flow in well under a second, producing a technically-real but unwatchably short
+            # video. This only adds wall-clock pacing; it changes no selectors, assertions or results.
+            browser = await p.chromium.launch(headless=True, slow_mo=350)
             try:
                 tasks = [asyncio.create_task(run_one(browser, spec)) for spec in specs]
                 for coro in asyncio.as_completed(tasks):
