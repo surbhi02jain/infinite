@@ -1,0 +1,245 @@
+{
+  "project_name": "AutoQA — Autonomous Test Orchestration Agent",
+  "archetype": "High-Contrast Tactical Observability (Obsidian Command & Live Kinetic Telemetry)",
+  "context_type": "DASHBOARDS_AND_DEVELOPER_TOOLS",
+  "theme_strategy": {
+    "default_mode": "dark",
+    "allow_toggle": true,
+    "philosophy": "Dark Obsidian command center with high-density kinetic visual feedback, crystal glass overlays, 1px tactical borders, and vivid status-mapped kinetic signals for real-time meta-agent execution."
+  },
+  "typography": {
+    "font_families": {
+      "headings": "Outfit, Manrope, -apple-system, sans-serif",
+      "body": "IBM Plex Sans, Inter, -apple-system, sans-serif",
+      "mono": "JetBrains Mono, Fira Code, Source Code Pro, monospace"
+    },
+    "hierarchy": {
+      "h1": "text-2xl sm:text-3xl lg:text-4xl font-bold tracking-tight text-white",
+      "h2": "text-xl sm:text-2xl font-semibold tracking-tight text-slate-100",
+      "h3": "text-lg sm:text-xl font-medium text-slate-200",
+      "h4": "text-base sm:text-lg font-medium text-slate-200",
+      "body": "text-sm text-slate-300 leading-relaxed",
+      "body_sm": "text-xs text-slate-400",
+      "mono_stream": "font-mono text-xs text-emerald-400/90 leading-tight tracking-wide",
+      "badge_label": "font-mono text-[10px] uppercase font-bold tracking-widest"
+    },
+    "banned_rules": [
+      "Never use generic Inter for large display headers without tracking-tight",
+      "Never exceed text-5xl for dashboard headlines",
+      "Keep high contrast for monospaced telemetry logs"
+    ]
+  },
+  "colors": {
+    "background": {
+      "primary": "#07090e",
+      "surface": "#0d131f",
+      "surface_elevated": "#131b2c",
+      "surface_card": "#0f172a",
+      "surface_sidebar": "#080c14",
+      "surface_glass": "rgba(15, 23, 42, 0.75)"
+    },
+    "borders": {
+      "subtle": "#1e293b",
+      "active": "#334155",
+      "glow_cyan": "rgba(6, 182, 212, 0.35)",
+      "glow_emerald": "rgba(16, 185, 129, 0.35)",
+      "glow_amber": "rgba(245, 158, 11, 0.35)",
+      "glow_rose": "rgba(239, 68, 68, 0.35)",
+      "glow_purple": "rgba(139, 92, 246, 0.35)"
+    },
+    "stage_palette": {
+      "EXPLORE": {
+        "bg": "bg-cyan-500/10",
+        "border": "border-cyan-500/40",
+        "text": "text-cyan-400",
+        "badge": "bg-cyan-950 text-cyan-300 border-cyan-800",
+        "glow": "shadow-[0_0_15px_rgba(6,182,212,0.25)]"
+      },
+      "PLAN": {
+        "bg": "bg-indigo-500/10",
+        "border": "border-indigo-500/40",
+        "text": "text-indigo-400",
+        "badge": "bg-indigo-950 text-indigo-300 border-indigo-800",
+        "glow": "shadow-[0_0_15px_rgba(99,102,241,0.25)]"
+      },
+      "EVALUATE": {
+        "bg": "bg-violet-500/10",
+        "border": "border-violet-500/40",
+        "text": "text-violet-400",
+        "badge": "bg-violet-950 text-violet-300 border-violet-800",
+        "glow": "shadow-[0_0_15px_rgba(139,92,246,0.25)]"
+      },
+      "GENERATE": {
+        "bg": "bg-fuchsia-500/10",
+        "border": "border-fuchsia-500/40",
+        "text": "text-fuchsia-400",
+        "badge": "bg-fuchsia-950 text-fuchsia-300 border-fuchsia-800",
+        "glow": "shadow-[0_0_15px_rgba(217,70,239,0.25)]"
+      },
+      "RUN": {
+        "bg": "bg-blue-500/10",
+        "border": "border-blue-500/40",
+        "text": "text-blue-400",
+        "badge": "bg-blue-950 text-blue-300 border-blue-800",
+        "glow": "shadow-[0_0_15px_rgba(59,130,246,0.25)]"
+      },
+      "HEAL": {
+        "bg": "bg-amber-500/10",
+        "border": "border-amber-500/40",
+        "text": "text-amber-400",
+        "badge": "bg-amber-950 text-amber-300 border-amber-800",
+        "glow": "shadow-[0_0_15px_rgba(245,158,11,0.25)]"
+      },
+      "REPORT": {
+        "bg": "bg-emerald-500/10",
+        "border": "border-emerald-500/40",
+        "text": "text-emerald-400",
+        "badge": "bg-emerald-950 text-emerald-300 border-emerald-800",
+        "glow": "shadow-[0_0_15px_rgba(16,185,129,0.25)]"
+      }
+    },
+    "status_indicators": {
+      "pass": "text-emerald-400 bg-emerald-950/60 border-emerald-500/30",
+      "fail_defect": "text-rose-400 bg-rose-950/60 border-rose-500/30",
+      "healed": "text-amber-300 bg-amber-950/60 border-amber-500/30",
+      "running": "text-cyan-400 bg-cyan-950/60 border-cyan-500/30 animate-pulse",
+      "pending": "text-slate-500 bg-slate-900 border-slate-800",
+      "skipped": "text-slate-400 bg-slate-800/40 border-slate-700/40"
+    }
+  },
+  "layout_and_grids": {
+    "mode": "MODE_B_HIGH_DENSITY_OBSERVABILITY",
+    "shell": "h-screen flex flex-col bg-[#07090e] text-slate-100 overflow-hidden",
+    "header": "h-14 border-b border-slate-800/80 px-5 flex items-center justify-between bg-[#0a0f18]/90 backdrop-blur-xl z-50 shrink-0",
+    "main_container": "flex-1 flex overflow-hidden",
+    "sidebar_runs": "w-72 lg:w-80 border-r border-slate-800/80 bg-[#080d16] flex flex-col shrink-0 overflow-y-auto",
+    "workspace_area": "flex-1 flex flex-col overflow-y-auto bg-[#07090e]",
+    "dag_stage_bar": "p-4 border-b border-slate-800/80 bg-[#0b101c] shrink-0",
+    "tabs_content_area": "flex-1 p-4 lg:p-6 space-y-6 overflow-y-auto",
+    "bento_grid": "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-12 gap-4"
+  },
+  "core_sections": [
+    {
+      "id": "new_run_modal_and_form",
+      "title": "Run Orchestration Trigger (Target App, Credentials, PRD & Goals)",
+      "description": "Streamlined interactive launcher for initiating end-to-end autonomous runs with preset templates (e-commerce, SaaS auth, fintech dashboard, AI chatbot)."
+    },
+    {
+      "id": "dag_pipeline_visualizer",
+      "title": "Interactive State Machine DAG Visualizer",
+      "description": "Visual linear DAG (EXPLORE → PLAN → EVALUATE → GENERATE → RUN → HEAL → REPORT) showing live active pulse, node status, timing duration, loopback arcs for healer iterations, and clickable node drill-down."
+    },
+    {
+      "id": "live_decision_console",
+      "title": "Live Meta-Agent Decision Log & Event Stream",
+      "description": "High-density streaming terminal console displaying explainable decision trails from Planner, Evaluator, Generator, and Healer with severity filters, sub-agent badges, raw JSON payload inspect, and live pause/resume/step controls."
+    },
+    {
+      "id": "test_plan_matrix",
+      "title": "Test Plan & User Flow Hierarchy",
+      "description": "Structured hierarchical view of discovered flows tagged by flow type (Happy Path, Edge Case, Auth Boundary, Negative/Error Injection), priority level, selector targets, and PRD requirement link."
+    },
+    {
+      "id": "plan_evaluation_audit",
+      "title": "Plan Evaluator Audit & Gap Analysis",
+      "description": "Coverage gaps identified before code generation, risk rating, missing boundary conditions, unexercised authentication branches, and auto-generated gap remediation prompts."
+    },
+    {
+      "id": "generated_code_monaco_view",
+      "title": "Playwright Code Viewer & Selector Validator",
+      "description": "High-fidelity code view with syntax highlighting, live selector validation status (verified green vs fallback vs flaky), export specs button, and copy-ready runnable Playwright scripts."
+    },
+    {
+      "id": "live_execution_feed",
+      "title": "Live Test Runner & Step Telemetry",
+      "description": "Step-by-step browser action feed with simulated DOM view / action screenshot preview, step duration, assertion checkpoints, and live network request logs."
+    },
+    {
+      "id": "self_healer_audit_panel",
+      "title": "Self-Healing vs Defect Decision Engine",
+      "description": "Side-by-side selector & DOM mutation diff, decision breakdown (Healed Script vs Genuine App Defect), confidence score meter (e.g. 94% Defect vs 88% Selector Drift), and explanation rationale."
+    },
+    {
+      "id": "final_quality_report",
+      "title": "Comprehensive Test Quality & Risk Report",
+      "description": "Executive summary with Pass Rate %, Healed %, Untested Flow Risk Index, Defect Severity Matrix, PRD-to-Test Traceability Heatmap, and one-click Export as HTML/JSON/Markdown."
+    },
+    {
+      "id": "runs_history_sidebar",
+      "title": "Execution History & Comparative Analytics",
+      "description": "List of previous runs with URL tag, status pill, duration, pass/fail ratio, and quick comparison mode between successive builds."
+    }
+  ],
+  "motion_and_interactions": {
+    "dag_pulse": "CSS pulse animation and traveling neon light-beam along SVG connection wires",
+    "event_stream": "Smooth entrance transitions for new streaming logs with instant auto-scroll toggle",
+    "monaco_tabs": "Instant tab-switching with crisp indicator underlines",
+    "hover_effects": "Subtle border lighting on cards with hover:border-slate-700 transition-colors duration-200",
+    "tooltips": "Fast Radix tooltips with dark obsidian backdrop and 1px slate-800 border"
+  },
+  "accessibility_and_testing": {
+    "wcag_compliance": "High-contrast APCA readable text over dark backgrounds (white/slate-100 on dark slate)",
+    "mandatory_data_testids": [
+      "run-form-url-input",
+      "run-form-login-url-input",
+      "run-form-username-input",
+      "run-form-password-input",
+      "run-form-prd-textarea",
+      "run-form-intent-input",
+      "run-form-budget-select",
+      "run-form-submit-button",
+      "pipeline-dag-container",
+      "dag-node-explore",
+      "dag-node-plan",
+      "dag-node-evaluate",
+      "dag-node-generate",
+      "dag-node-run",
+      "dag-node-heal",
+      "dag-node-report",
+      "live-event-stream-container",
+      "event-stream-filter-select",
+      "event-stream-clear-button",
+      "test-plan-tab-trigger",
+      "plan-evaluation-tab-trigger",
+      "generated-code-tab-trigger",
+      "execution-feed-tab-trigger",
+      "healer-log-tab-trigger",
+      "final-report-tab-trigger",
+      "code-copy-button",
+      "report-export-json-button",
+      "report-export-html-button",
+      "report-rerun-button",
+      "runs-history-list",
+      "run-history-item"
+    ]
+  },
+  "image_urls": [
+    {
+      "category": "developer_code_background",
+      "description": "Telemetry background and developer code ambiance for empty states or hero headers",
+      "url": "https://images.unsplash.com/photo-1461749280684-dccba630e2f6?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzJ8MHwxfHNlYXJjaHwyfHxjeWJlciUyMHNvZnR3YXJlJTIwY29kZXxlbnwwfHx8fDE3ODg1MDA5MjB8MA&ixlib=rb-4.1.0&q=85"
+    },
+    {
+      "category": "cyber_matrix_telemetry",
+      "description": "High-tech matrix streams for agent thinking / scanning visuals",
+      "url": "https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzJ8MHwxfHNlYXJjaHwxfHxjeWJlciUyMHNvZnR3YXJlJTIwY29kZXxlbnwwfHx8fDE3ODg1MDA5MjB8MA&ixlib=rb-4.1.0&q=85"
+    }
+  ],
+  "instructions_to_main_agent": [
+    "Build the complete autonomous test orchestration application in React (.js files) with Tailwind CSS and Radix/Lucide components.",
+    "Implement the live state-machine pipeline (EXPLORE → PLAN → EVALUATE → GENERATE → RUN → HEAL → REPORT) with rich realistic streaming simulation that allows testing any web URL or preset app.",
+    "Include pre-configured demo presets (e.g., 'E-Commerce Checkout Flow', 'SaaS Multi-Tenant Auth & Billing', 'Fintech Dashboard & Transfer', 'AI Assistant Chat Interface') so evaluators can trigger immediate realistic runs without typing.",
+    "Provide a full streaming decision console showing sub-agent thoughts, actions, tool calls, DOM selector inspections, and validation reasoning.",
+    "In the Monaco / Code view, provide complete realistic Playwright test specs (.spec.js) with page fixture, assertions, auto-waiting, and live selector status flags.",
+    "In the Self-Healer panel, visually showcase before/after DOM snippets, selector mutation diffs (e.g. data-testid='submit-btn' shifted to button[type='submit']), and confidence breakdown between Script Flake / Selector Drift (Healed) vs Actual Regression / Defect (Flagged with severity).",
+    "In the Final Report, provide rich metrics: Total flows, Passed, Failed defects, Self-healed, Untested Flow Risk Index, PRD Coverage Heatmap, and functional Export to JSON & HTML report download.",
+    "Ensure all buttons, inputs, tabs, and key status badges contain the required data-testid attributes.",
+    "Use Sonner for toasts upon actions (Triggering Run, Copying Code, Exporting Report, Retrying Flow)."
+  ],
+  "UNIVERSAL GUIDELINES FOR MAIN AGENT": {
+    "no_ai_slop": "Avoid generic centered cards and gray flat boxes. Use high-density tactical grids, crisp 1px borders, subtle glows, and monospace telemetry badges.",
+    "no_universal_transition": "Do not apply 'transition: all' globally. Use targeted transitions on background-color, border-color, and opacity.",
+    "contrast_standards": "All status indicators and text must meet APCA / WCAG AA readability against dark slate obsidian surfaces.",
+    "toast_usage": "Use sonner for notifications located in /src/components/ui/sonner.jsx."
+  }
+}

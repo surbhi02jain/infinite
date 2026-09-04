@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration-2 re-test of all iteration_1 fixes. Backend: 26 pytest cases (existing 18 + 8 new for iteration-2 fixes) — 26/26 PASSED in 247s against the PUBLIC preview URL, including the CRITICAL SSE longevity regression (rewritten sse_longevity_test.py now emulates the frontend reconnect-with-after_seq behaviour and reaches run_complete). Frontend: launched a FRESH live run from the UI (https://example.com) and the UI did NOT freeze — all 7 DAG nodes reached done, Final Report rendered live (80% pass, 5 flows, 2 passed, 2 self-healed, 1 defect, risk 22) without re-opening the run. Verified events endpoint, REPORT stage_complete, healer heals>=1, budget flow cap, pause+resume (CTA disappears, EVALUATE resets to done, run completes), CodeViewer clean rendering + copy with no CRA overlay/unhandled rejection, blob-based JSON/HTML export downloads (autoqa-<id>.json / .html), all 6 tabs, runs-history navigation, and no zombie running runs after startup reconciliation.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "orchestrator LLM calls (planner/evaluator/generator)", "issue": "Under back-to-back runs the Emergent/Gemini key returns litellm.RateLimitError and the pipeline logs 'LLM call degraded ... using deterministic fallback' (observed on the pause/resume run: PLAN/EVALUATE/GENERATE all degraded). Behaviour is graceful and the run still completes, but heavy usage silently downgrades plan quality — consider a short retry/backoff before falling back."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Pipeline DAG", "issues": ["Stage durations frequently render as '0.0s' (REPORT always 0.0s, HEAL/RUN often 0.0-0.6s) — sub-second stages read as if untimed; consider ms formatting.", "Header status chip shows 'IDLE' after a run finishes instead of 'COMPLETED'; slightly ambiguous vs. the iteration_1 freeze symptom."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/sse_longevity_test.py",
+    "/app/backend/tests/sse_internal_rca_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "No blocking issues. Optional: add retry/backoff on Gemini RateLimitError before the deterministic fallback; format sub-second stage durations in the DAG; show COMPLETED/FAILED instead of IDLE in the header after a run ends."
+  ],
+  "critical_code_review_comments": [
+    "api.js streamRun now reconnects with ?after_seq and Dashboard.js keeps a 5s /events?after_seq polling backstop plus seqRef dedupe — verified resilient to the ~60s ingress cut; no further change needed.",
+    "GET /api/runs/{id}/events and /stream both filter seq>after_seq and project away _id — confirmed no duplicate/lost events on reconnect (test asserts strictly increasing seq).",
+    "reconcile_orphans() on startup correctly clears running/queued/paused leftovers (iteration_1's zombie run 9ee4e166 is gone; test_no_zombie_running_runs passes)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/sse_longevity_test.py"
+  ],
+  "success_rate": {"backend": "100% (26/26 pytest)", "frontend": "100% (live run to REPORT, all 6 tabs, exports, copy, pause/resume, history nav)"},
+  "seed_data_creation": "~6 new runs against https://example.com (budget quick/standard, one pause_after_plan, one with TEST_ intent/prd and masked password) created via API + UI.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "N/A — AutoQA has no auth. EMERGENT_LLM_KEY in backend/.env works (occasional rate limiting under load).",
+  "context_for_next_testing_agent": "Run `pytest /app/backend/tests/backend_test.py /app/backend/tests/sse_longevity_test.py -v` (~4 min; real LLM runs). sse_longevity_test.py is the SSE regression: it now reconnects with ?after_seq exactly like api.js and must reach run_complete over the public URL. All iteration_1 issues (60s SSE freeze, REPORT stage_complete, resume CTA/EVALUATE reset, clipboard, highlight leak, window.open export, healed=0, orphan runs, flow cap) are verified FIXED. Editing files under /app/backend/** triggers uvicorn --reload and kills in-flight runs — edit tests before launching runs.",
+  "rca_of_the_issue": "N/A — no unresolved defects this iteration."
+}

@@ -1,0 +1,66 @@
+{
+  "summary": "Full backend + frontend E2E test of AutoQA. Backend: 18 pytest cases in /app/backend/tests/backend_test.py (create/list/get run, validation, full 7-stage pipeline with real Gemini calls, event persistence, report summary, SSE, JSON/HTML export, pause+resume, password masking, 404s) -> 17 passed / 1 failed. Added 2 diagnostic SSE tests that isolate a CRITICAL live-streaming defect: the public ingress terminates the /api/runs/{id}/stream response at exactly ~60s while runs take 70-90s, so the dashboard freezes mid-pipeline (header flips to IDLE, DAG stuck on GENERATE) and never shows Runner/Healer/Report until the user re-opens the run from history. Frontend: landing form, 4 presets, DAG (7 nodes), live decision stream, all 6 workspace tabs, spec switching, metric cards, JSON/HTML export, runs-history navigation and pause/resume all verified working on completed runs.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "GET /api/runs/{id}/stream", "issue": "SSE response is cut by the preview ingress/CDN at ~60s (verified: public URL closed cleanly at 60.2s after 64 events with run still 'running'; same run streamed to run_complete in 72.5s on internal localhost:8001 => proxy-level response timeout, not an app bug). Runs take 70-90s, so EVERY live run loses the stream mid-pipeline. Needs mitigation: support Last-Event-ID / ?after_seq= resume + frontend auto-reconnect, and/or a polling fallback on GET /api/runs/{id}.", "priority": "CRITICAL"}
+    ],
+    "minor": [
+      {"endpoint": "orchestrator._stage_report", "issue": "REPORT stage never emits a 'stage_complete' event (only 'report'). Contract says stage_start/stage_complete per stage; UI therefore shows REPORT as 'done' with no duration (relies on the run_complete fallback in derive.js). Test test_event_types_persisted fails on this."},
+      {"endpoint": "POST /api/runs (pause_after_plan)", "issue": "After resume, run.stages.EVALUATE stays 'awaiting' forever (never reset to 'done'), e.g. run 4b905a36 completed with stages.EVALUATE='awaiting'. Also no 'resumed' event is emitted, which leaves the frontend Resume CTA stuck (see UI bug)."},
+      {"endpoint": "orchestrator.run", "issue": "No recovery for interrupted runs: a backend reload/restart mid-run leaves the run permanently in status 'running' (observed run 9ee4e166 stuck at HEAL for >10 min). No stage timeout and no startup reconciliation to mark orphaned runs failed; the SSE endpoint then hangs on heartbeats forever."},
+      {"endpoint": "server.py import", "issue": "Top-level 'from report_export import build_html_report' / 'from orchestrator import ...' are cwd-dependent; backend.err.log contains a ModuleNotFoundError: No module named 'report_export' boot failure. Use package-relative imports or explicit sys.path to make boot deterministic."},
+      {"endpoint": "orchestrator._selector_valid / _known_selectors", "issue": "Selector 'live validation' only string-matches against inputs/buttons harvested from the crawl, so valid CSS locators (h1, p, div, a[href*=...], meta[name=viewport]) are reported 'not found, regenerated fallback'. This drives verified_ratio<0.5 which forces the simulated runner to fail 70% of specs (pass rates 25-57%). Validate with BeautifulSoup soup.select() against the fetched HTML instead."},
+      {"endpoint": "orchestrator._stage_heal", "issue": "Self-healing is never demonstrated: healed=0 in every run observed (6 runs). The healer LLM overrides the 'script' heuristic to 'review' because the prompt contains no DOM/selector context ('we lack the DOM context'). Pass the discovered surface/known selectors into the healer prompt so a real old->new selector heal can be produced."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Dashboard / streamRun (api.js)", "issue": "es.onerror closes the EventSource permanently and no events are re-fetched, so when the 60s proxy cut happens the whole pipeline view freezes (header 'IDLE', DAG stuck at GENERATE running, Runner/Healer/Report tabs stay empty) even though the backend finished. Reproduced end-to-end: run 587eddc7 finished 06:12:41 while UI stayed frozen at the 06:12:27 event for 3+ minutes.", "selector": "[data-testid=\"pipeline-dag-container\"]", "priority": "CRITICAL"},
+      {"component": "PipelineDAG resume CTA / lib/derive.js", "issue": "'Approve Plan & Resume' button stays visible after a successful resume and for the rest of the run (derive clears `awaiting` only on the 'auto_resume' event, never on manual resume or on the next stage_start). Clicking it again would 400.", "selector": "[data-testid=\"resume-run-button\"]", "priority": "HIGH"},
+      {"component": "CodeViewer.copy", "issue": "navigator.clipboard.writeText is called with no try/catch and no promise rejection handling -> unhandled NotAllowedError ('Failed to execute writeText on Clipboard: Write permission denied') which in dev pops the CRA error overlay covering the whole app, and in prod silently shows a false 'Spec copied' success toast.", "selector": "[data-testid=\"code-copy-button\"]", "priority": "HIGH"},
+      {"component": "CodeViewer.highlight()", "issue": "Syntax highlighter leaks raw markup into rendered code: comment lines render as `\"color:#64748b\">// Step 1: Open the base URL` (broken replacement/regex in the highlight function).", "selector": "[data-testid=\"code-content\"]", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [
+      {"flow": "Live pipeline streaming (launch run -> watch to completion)", "issue": "UI never reaches the Report stage on a live run because of the 60s SSE cut + no reconnect; user must re-open the run from the sidebar to see results. Also runs stuck server-side (status 'running') keep the sidebar badge on RUNNING indefinitely with no client-side timeout.", "affected_selectors": ["[data-testid=\"live-event-stream-container\"]", "[data-testid=\"dag-node-report\"]", "[data-testid=\"final-report-tab-trigger\"]"]},
+      {"flow": "Report export", "issue": "Exports use window.open(...) with an attachment Content-Disposition; backend returns correct 200 JSON/HTML but the popup resolves to an empty URL and would be blocked by popup blockers. Prefer an anchor with download attr / blob download. (Endpoints themselves verified OK.)", "affected_selectors": ["[data-testid=\"report-export-json-button\"]", "[data-testid=\"report-export-html-button\"]"]}
+    ],
+    "design_issues": [
+      {"screen": "Pipeline DAG", "issues": ["REPORT node shows the literal text 'done' where other nodes show a duration (missing REPORT stage_complete event)."]},
+      {"screen": "Overall dark theme", "issues": ["Contrast, spacing, alignment and the runs sidebar all read well at 1920x1080; no contrast failures found. Decision-stream timestamps at 10-11px on #070b12 are borderline but legible."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/sse_longevity_test.py",
+    "/app/backend/tests/sse_internal_rca_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "CRITICAL: make live streaming survive the ~60s ingress response cap — add ?after_seq/Last-Event-ID resume on GET /api/runs/{id}/stream, auto-reconnect in api.js streamRun (do not close on onerror), and/or fall back to polling GET /api/runs/{id} to refresh events; do not leave derived state built only from an unreliable stream.",
+    "Clear the awaiting/resume CTA after resume (emit a 'resumed' event, reset stages.EVALUATE to 'done', and clear awaiting in derive.js on resume/next stage_start).",
+    "Emit stage_complete for the REPORT stage.",
+    "Wrap navigator.clipboard.writeText in try/catch with a fallback + error toast in CodeViewer.",
+    "Fix the CodeViewer highlight() function leaking `\"color:#64748b\">` into the rendered code.",
+    "Add orphaned-run recovery (startup reconciliation + per-stage timeout) so a restart doesn't leave runs stuck in 'running' forever.",
+    "Improve selector validation (soup.select against fetched HTML) and give the healer DOM context so pass rate and healed>0 are realistic."
+  ],
+  "critical_code_review_comments": [
+    "api.js streamRun: onerror -> es.close() + onEnd disables the app's core live feature on any transient drop; EventSource's native reconnect is defeated and no state is re-synced.",
+    "Dashboard.js: derived state comes exclusively from the `events` array; onEnd re-fetches only the run doc, so any lost event permanently corrupts the view. Re-fetch GET /api/runs/{id} events on stream end.",
+    "orchestrator.run: asyncio.create_task result is never retained/awaited and there is no watchdog; combined with in-memory _resume_events and defaultdict_seq, all run control state is lost on restart.",
+    "_stage_report does not emit stage_complete, breaking the documented per-stage event contract.",
+    "CodeViewer.copy(): unhandled promise rejection + success toast fired before the write resolves (false positive)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/sse_longevity_test.py",
+    "/app/backend/tests/sse_internal_rca_test.py"
+  ],
+  "success_rate": {"backend": "90% (18/20 assertions-level tests passed; 2 failures = REPORT stage_complete missing + SSE 60s cut)", "frontend": "80% (all views/tabs/exports/history/pause-resume work; live-run streaming freeze + resume CTA + clipboard/highlight bugs)"},
+  "seed_data_creation": "Created ~8 real runs against https://example.com and https://the-internet.herokuapp.com/login (TEST_ intent/prd markers on some). One run (9ee4e166) is intentionally left stuck in status 'running' as evidence of the no-orphan-recovery issue; delete from the runs collection if it pollutes the sidebar.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "N/A — AutoQA has no auth (per /app/memory/test_credentials.md). EMERGENT_LLM_KEY in backend/.env worked; all Gemini calls succeeded (no LLM-degraded fallbacks observed).",
+  "context_for_next_testing_agent": "Run `pytest /app/backend/tests/backend_test.py -n 0` (takes ~3 min; the session fixture executes a full real-LLM run). NOTE: creating/editing files under /app/backend/tests triggers uvicorn --reload which kills in-flight runs — write new test files elsewhere or expect zombie runs. sse_longevity_test.py is the regression test for the CRITICAL 60s stream cut: it must reach run_complete over the public URL once the fix lands. sse_internal_rca_test.py proves the app-level stream is healthy on localhost:8001. For frontend, open a COMPLETED run from [data-testid=run-history-item] to exercise all tabs; a freshly launched run will freeze mid-pipeline until the SSE fix.",
+  "rca_of_the_issue": "SSE freeze: GET /api/runs/{id}/stream is closed by the Cloudflare/ingress layer at a hard ~60s response limit (public URL closed at 60.2s mid-GENERATE; identical run streamed to completion in 72.5s over localhost:8001). Frontend streamRun treats the resulting EventSource error as a terminal end (es.close() + onEnd) and Dashboard only re-fetches the run document, not events, while all derived pipeline/tab state is computed from the events array — so the UI is permanently frozen at the last received event even though the backend completes normally. Fix requires resumable streaming (after_seq/Last-Event-ID) plus reconnect and/or an events re-fetch on stream end."
+}
