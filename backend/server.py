@@ -8,8 +8,9 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Dict
 
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse, Response
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -22,6 +23,7 @@ sys.path.insert(0, str(ROOT_DIR))
 from event_bus import bus
 from orchestrator import Orchestrator, _resume_events, STAGES
 from report_export import build_html_report
+from pw_engine import ARTIFACTS_ROOT
 
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
@@ -157,13 +159,13 @@ async def get_report(run_id: str):
 
 
 @api_router.get("/runs/{run_id}/export")
-async def export_report(run_id: str, fmt: str = "json"):
+async def export_report(run_id: str, request: Request, fmt: str = "json"):
     report = await db.reports.find_one({"run_id": run_id}, {"_id": 0})
     run = await db.runs.find_one({"id": run_id}, {"_id": 0, "surface": 0})
     if not report:
         raise HTTPException(404, "Report not ready")
     if fmt == "html":
-        html = build_html_report(run, report)
+        html = build_html_report(run, report, origin=str(request.base_url).rstrip("/"))
         return Response(content=html, media_type="text/html",
                         headers={"Content-Disposition": f'attachment; filename="autoqa-{run_id[:8]}.html"'})
     return Response(content=json.dumps(report, indent=2, default=str), media_type="application/json",
@@ -171,6 +173,7 @@ async def export_report(run_id: str, fmt: str = "json"):
 
 
 app.include_router(api_router)
+app.mount("/artifacts", StaticFiles(directory=str(ARTIFACTS_ROOT)), name="artifacts")
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,

@@ -24,7 +24,7 @@ const PRESETS = [
     prd: "Dashboard shows account balance. Transfers validate sufficient funds. Negative amounts blocked. 2FA on large transfers." },
 ];
 
-const MODELS = ["gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-3-flash-preview", "claude-sonnet-4-6", "gpt-5.4"];
+const MODELS = ["sarvam-105b", "sarvam-105b-conversations", "glm5.2", "gemma4", "deepseekv4-flash"];
 const AGENTS = [["planner", "Planner"], ["evaluator", "Evaluator"], ["generator", "Generator"], ["healer", "Healer"]];
 
 export default function RunForm({ onSubmit }) {
@@ -38,7 +38,7 @@ export default function RunForm({ onSubmit }) {
   const [workers, setWorkers] = useState("3");
   const [pause, setPause] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [models, setModels] = useState({ planner: "gemini-3.5-flash", evaluator: "gemini-3.5-flash", generator: "gemini-3.5-flash", healer: "gemini-3.1-pro-preview" });
+  const [models, setModels] = useState({ planner: "sarvam-105b", evaluator: "sarvam-105b", generator: "sarvam-105b", healer: "sarvam-105b" });
 
   const applyPreset = (p) => { setUrl(p.url); setIntent(p.intent); setPrd(p.prd); };
 

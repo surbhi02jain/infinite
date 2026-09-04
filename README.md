@@ -53,11 +53,10 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate            # Windows: .venv\Scripts\activate
 
-# install dependencies
-pip install -r requirements.txt
-
-# if emergentintegrations is not found, install it from the Emergent index:
-pip install emergentintegrations --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/
+# install dependencies (requirements.txt is a fully-pinned lockfile: install it with
+# --no-deps so pip doesn't re-resolve the graph, and point it at the Emergent index
+# so emergentintegrations/litellm can be found)
+pip install --no-deps -r requirements.txt --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/
 ```
 
 Create `backend/.env`:
@@ -140,7 +139,8 @@ App opens at **http://localhost:3000**.
 
 | Symptom | Fix |
 |--------|-----|
-| `ModuleNotFoundError: emergentintegrations` | Run the `--extra-index-url` pip install in step 3 |
+| `ModuleNotFoundError: emergentintegrations` | Re-run the install in step 3 with `--extra-index-url` |
+| `ResolutionImpossible` / `resolution-too-deep` on `pip install` | Use the `--no-deps` install command from step 3 — this file is a pinned lockfile, so let pip skip resolution instead of re-solving the graph |
 | Frontend can't reach backend / CORS error | Check `REACT_APP_BACKEND_URL=http://localhost:8001` and that backend is running |
 | `pymongo.errors.ServerSelectionTimeoutError` | MongoDB isn't running / wrong `MONGO_URL` |
 | Runs stall in `PLAN`/`GENERATE` | LLM rate limiting — wait and retry; runs still complete via deterministic fallback |

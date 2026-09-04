@@ -86,3 +86,6 @@ android-sdk/
 credentials.json
 *.key
 .credentials
+
+# AutoQA run artifacts (screenshots, videos, traces) — regenerated per run
+backend/run_artifacts/

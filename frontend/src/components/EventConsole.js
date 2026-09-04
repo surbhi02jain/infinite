@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState } from "react";
-import { Terminal, Trash2, ArrowDownToLine } from "lucide-react";
+import { Terminal, Trash2, ArrowDownToLine, Download } from "lucide-react";
+import { toast } from "sonner";
 import { STAGE_META } from "@/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,6 +24,23 @@ export default function EventConsole({ events, live }) {
     if (autoScroll && endRef.current) endRef.current.scrollIntoView({ behavior: "smooth" });
   }, [visible.length, autoScroll]);
 
+  const exportEvents = () => {
+    try {
+      const blob = new Blob([JSON.stringify(visible, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `autoqa-events-${Date.now()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success("Exported event log");
+    } catch (_) {
+      toast.error("Export failed");
+    }
+  };
+
   return (
     <div data-testid="live-event-stream-container" className="w-[360px] xl:w-[440px] shrink-0 flex flex-col bg-[#070b12] border-l border-slate-800/80">
       <div className="h-11 px-3 flex items-center justify-between border-b border-slate-800/80 shrink-0">
@@ -45,6 +63,11 @@ export default function EventConsole({ events, live }) {
             onClick={() => setAutoScroll(!autoScroll)}
             className={`h-7 w-7 ${autoScroll ? "text-emerald-400" : "text-slate-500"}`}>
             <ArrowDownToLine className="w-3.5 h-3.5" />
+          </Button>
+          <Button data-testid="event-stream-download-button" size="icon" variant="ghost"
+            onClick={exportEvents} disabled={visible.length === 0}
+            className="h-7 w-7 text-slate-500 hover:text-emerald-400 disabled:opacity-40 disabled:pointer-events-none">
+            <Download className="w-3.5 h-3.5" />
           </Button>
           <Button data-testid="event-stream-clear-button" size="icon" variant="ghost"
             onClick={() => setCleared(events.length)} className="h-7 w-7 text-slate-500 hover:text-rose-400">

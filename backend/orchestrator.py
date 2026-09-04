@@ -4,18 +4,17 @@ import re
 import json
 import uuid
 import asyncio
-import random
 from datetime import datetime, timezone
-from urllib.parse import urljoin, urlparse
 
 import httpx
-from bs4 import BeautifulSoup
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+from playwright.async_api import async_playwright
 
 from event_bus import bus
+import pw_engine
 
-EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY")
-DEFAULT_MODEL = "gemini-3.5-flash"
+SARVAM_API_KEY = os.environ.get("SARVAM_API_KEY")
+SARVAM_API_URL = "https://api.sarvam.ai/v1/chat/completions"
+DEFAULT_MODEL = "sarvam-105b"
 
 STAGES = ["EXPLORE", "PLAN", "EVALUATE", "GENERATE", "RUN", "HEAL", "REPORT"]
 
@@ -32,14 +31,30 @@ def now_iso():
 # LLM helper
 # ----------------------------------------------------------------------------
 async def llm_json(system: str, prompt: str, model: str = DEFAULT_MODEL, session: str = None):
-    """Call Gemini via Emergent universal key and parse JSON out of the reply."""
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=session or str(uuid.uuid4()),
-        system_message=system,
-    ).with_model("gemini", model)
-    resp = await chat.send_message(UserMessage(text=prompt))
-    text = resp if isinstance(resp, str) else str(resp)
+    """Call Sarvam AI's OpenAI-compatible chat completions endpoint and parse JSON out of the reply."""
+    async with httpx.AsyncClient(timeout=55) as client:
+        resp = await client.post(
+            SARVAM_API_URL,
+            headers={
+                "Authorization": f"Bearer {SARVAM_API_KEY}",
+                "api-subscription-key": SARVAM_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.2,
+                # Sarvam's reasoning models spend tokens on reasoning_content before writing the
+                # final answer — too low a budget truncates to an empty content field.
+                "max_tokens": 8192,
+                "reasoning_effort": "low",
+            },
+        )
+        resp.raise_for_status()
+        text = resp.json()["choices"][0]["message"]["content"]
     return _extract_json(text), text
 
 
@@ -59,58 +74,6 @@ def _extract_json(text: str):
         except Exception:
             continue
     return None
-
-
-# ----------------------------------------------------------------------------
-# Explorer (real lightweight DOM/route crawl)
-# ----------------------------------------------------------------------------
-async def explore_target(url: str, login_url: str = None, max_pages: int = 4):
-    surface = {"base_url": url, "pages": [], "routes": [], "forms": [], "interactive": [], "error": None}
-    visited = set()
-    to_visit = [url]
-    if login_url and login_url not in to_visit:
-        to_visit.append(login_url)
-    base_host = urlparse(url).netloc
-    async with httpx.AsyncClient(follow_redirects=True, timeout=12.0,
-                                 headers={"User-Agent": "AutoQA-Explorer/1.0"}) as client:
-        while to_visit and len(visited) < max_pages:
-            u = to_visit.pop(0)
-            if u in visited:
-                continue
-            visited.add(u)
-            try:
-                r = await client.get(u)
-                soup = BeautifulSoup(r.text, "lxml")
-                title = (soup.title.string or "").strip() if soup.title else ""
-                page = {"url": u, "status": r.status_code, "title": title,
-                        "links": [], "forms": [], "buttons": [], "inputs": []}
-                for a in soup.find_all("a", href=True)[:40]:
-                    href = urljoin(u, a["href"])
-                    if urlparse(href).netloc == base_host:
-                        page["links"].append({"text": a.get_text(strip=True)[:60], "href": href})
-                        if href not in visited and href not in to_visit and len(to_visit) < max_pages:
-                            to_visit.append(href)
-                for f in soup.find_all("form")[:10]:
-                    fields = []
-                    for inp in f.find_all(["input", "select", "textarea"]):
-                        fields.append({"name": inp.get("name") or inp.get("id") or "",
-                                       "type": inp.get("type") or inp.name,
-                                       "placeholder": inp.get("placeholder") or ""})
-                    fform = {"action": urljoin(u, f.get("action") or u), "method": (f.get("method") or "get").upper(), "fields": fields}
-                    page["forms"].append(fform)
-                    surface["forms"].append(fform)
-                for b in soup.find_all(["button"])[:20]:
-                    page["buttons"].append(b.get_text(strip=True)[:40] or b.get("aria-label") or "button")
-                for inp in soup.find_all("input")[:25]:
-                    tid = inp.get("data-testid") or inp.get("id") or inp.get("name")
-                    if tid:
-                        page["inputs"].append({"selector": tid, "type": inp.get("type") or "text"})
-                surface["pages"].append(page)
-                surface["routes"].append({"path": urlparse(u).path or "/", "title": title, "status": r.status_code})
-            except Exception as e:
-                surface["pages"].append({"url": u, "status": 0, "title": "", "error": str(e)[:120],
-                                         "links": [], "forms": [], "buttons": [], "inputs": []})
-    return surface
 
 
 def surface_summary(surface: dict) -> str:
@@ -190,7 +153,7 @@ class Orchestrator:
                 await self.db.runs.update_one({"id": run_id}, {"$set": {"status": "running"}})
 
             specs = await self._stage_generate(run_id, config, surface, plan, m("generator"))
-            executions = await self._stage_run(run_id, config, specs)
+            executions = await self._stage_run(run_id, config, surface, specs)
             healer = await self._stage_heal(run_id, config, surface, executions, m("healer"))
             await self._stage_report(run_id, config, surface, plan, specs, executions, healer)
 
@@ -208,19 +171,28 @@ class Orchestrator:
     async def _stage_explore(self, run_id, config):
         await self.set_stage(run_id, "EXPLORE", "running")
         await self.emit(run_id, "EXPLORE", "explorer", "info", "stage_start",
-                        "Explorer crawling target DOM, routes & interactive surface...")
-        surface = await explore_target(config["url"], config.get("login_url"))
+                        "Explorer launching headless Chromium to crawl the JS-rendered DOM, routes & interactive surface...")
+        surface = await pw_engine.explore_target_pw(
+            run_id, config["url"], config.get("login_url"), config.get("username"), config.get("password"))
         for p in surface["pages"]:
             await self.emit(run_id, "EXPLORE", "explorer", "info", "log",
                             f"Mapped {p['url']} -> status {p.get('status')}, "
-                            f"{len(p.get('links', []))} links, {len(p.get('forms', []))} forms",
+                            f"{len(p.get('links', []))} links, {len(p.get('forms', []))} forms, "
+                            f"{len(p.get('buttons', []))} buttons",
                             {"page": p})
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(0.1)
         if config.get("auth_mode") == "authenticated":
-            await self.emit(run_id, "EXPLORE", "explorer", "success", "log",
-                            f"Performed login at {config.get('login_url') or config['url']} and persisted "
-                            "Playwright storageState.json (cookies/session) for reuse across all tests.",
-                            {"storage_state": "storageState.json"})
+            auth = surface.get("auth") or {}
+            if auth.get("ok"):
+                await self.emit(run_id, "EXPLORE", "explorer", "success", "log",
+                                f"Logged in at {auth.get('login_url')} and persisted real Playwright "
+                                "storageState.json (cookies/session) for reuse across all tests.",
+                                {"storage_state": surface.get("storage_state_path")})
+            else:
+                await self.emit(run_id, "EXPLORE", "explorer", "warn", "log",
+                                f"Login attempt at {auth.get('login_url')} failed "
+                                f"({auth.get('error') or 'no matching form found'}); continuing unauthenticated.",
+                                {})
         await self.db.runs.update_one({"id": run_id}, {"$set": {"surface": surface}})
         await self.emit(run_id, "EXPLORE", "explorer", "success", "stage_complete",
                         f"Exploration complete: {len(surface['pages'])} pages, "
@@ -331,7 +303,8 @@ class Orchestrator:
                                 {"selector": s, "ok": ok})
                 await asyncio.sleep(0.08)
             spec = {"id": str(uuid.uuid4()), "run_id": run_id, "flow_id": f["flow_id"], "flow_name": f["name"],
-                    "flow_type": f["type"], "filename": filename, "code": code, "selectors": validated}
+                    "flow_type": f["type"], "filename": filename, "code": code, "selectors": validated,
+                    "flow_steps": f.get("steps") or []}
             specs.append(spec)
             await self.db.test_specs.insert_one(dict(spec))
             spec.pop("_id", None)
@@ -345,56 +318,54 @@ class Orchestrator:
         return specs
 
     # ---- RUN ----
-    async def _stage_run(self, run_id, config, specs):
+    async def _stage_run(self, run_id, config, surface, specs):
         await self.set_stage(run_id, "RUN", "running")
-        workers = int(config.get("workers", 3))
+        workers = max(1, int(config.get("workers", 3)))
         await self.emit(run_id, "RUN", "runner", "info", "stage_start",
-                        f"Runner executing {len(specs)} specs on headless Chromium ({workers} parallel workers)...")
+                        f"Runner executing {len(specs)} specs on real headless Chromium ({workers} parallel workers)...")
+        storage_state_path = surface.get("storage_state_path")
         executions = []
-        n = len(specs)
-        # deterministic-but-realistic mix seeded per run for a compelling demo:
-        # ~1 healable selector failure, ~1 genuine defect, rest pass. Error-type flows pass.
-        rng = random.Random(run_id)
-        fail_slots = {}
-        candidates = [i for i, s in enumerate(specs) if s["flow_type"] != "error"]
-        rng.shuffle(candidates)
-        if candidates:
-            fail_slots[candidates[0]] = "selector-not-found"   # -> healed
-        if len(candidates) > 1:
-            fail_slots[candidates[1]] = rng.choice(["assertion-failed", "network-5xx", "console-exception"])  # -> defect
-        if len(candidates) > 3 and n >= 5:
-            fail_slots[candidates[2]] = "selector-not-found"   # -> second heal
-        for idx, spec in enumerate(specs):
-            verified_ratio = (len([v for v in spec["selectors"] if v["status"] == "verified"]) /
-                              max(1, len(spec["selectors"])))
-            if idx in fail_slots:
-                status = "failed"
-                fail_type = fail_slots[idx]
-            elif verified_ratio < 0.34 and rng.random() < 0.5:
-                status = "failed"
-                fail_type = "selector-not-found"
-            else:
-                status = "passed"
-            duration = round(rng.uniform(1.2, 6.5), 1)
-            ex = {"id": str(uuid.uuid4()), "run_id": run_id, "spec_id": spec["id"], "flow_id": spec["flow_id"],
-                  "flow_name": spec["flow_name"], "flow_type": spec["flow_type"], "status": status,
-                  "duration": duration, "worker": rng.randint(1, workers), "final_status": status,
-                  "artifacts": {"screenshot": f"{_slug(spec['flow_name'])}.png",
-                                "trace": f"{_slug(spec['flow_name'])}.zip",
-                                "video": f"{_slug(spec['flow_name'])}.webm"}}
-            if status == "failed":
-                ex["fail_type"] = fail_type
-                ex["error"] = _error_msg(fail_type, spec)
-                ex["console_errors"] = ["Uncaught TypeError: cannot read 'value' of null"] if fail_type == "console-exception" else []
-                ex["network"] = [{"url": config["url"].rstrip("/") + "/api/checkout", "status": 500}] if fail_type == "network-5xx" else []
-            executions.append(ex)
-            await self.db.executions.insert_one(dict(ex))
-            ex.pop("_id", None)
-            lvl = "success" if status == "passed" else "error"
-            await self.emit(run_id, "RUN", "runner", lvl, "exec_result",
-                            f"[worker {ex['worker']}] {spec['flow_name']} -> {status.upper()} ({duration}s)",
-                            {"execution": ex})
-            await asyncio.sleep(0.25)
+        sem = asyncio.Semaphore(workers)
+        worker_slots = asyncio.Queue()
+        for i in range(1, workers + 1):
+            worker_slots.put_nowait(i)
+
+        async def on_step(spec, step_entry, total_steps):
+            lvl = "info" if step_entry["ok"] else "warn"
+            note = f" — {step_entry['note']}" if step_entry.get("note") else ""
+            await self.emit(run_id, "RUN", "runner", lvl, "step",
+                            f"[{spec['flow_name']}] step {step_entry['index']}/{total_steps}: "
+                            f"{step_entry['description']}{note}",
+                            {"flow_id": spec["flow_id"], "step": step_entry})
+
+        async def run_one(browser, spec):
+            worker_id = await worker_slots.get()
+            try:
+                async with sem:
+                    flow = {"flow_id": spec["flow_id"],
+                            "steps": spec.get("flow_steps") or ["Navigate to base URL", "Assert page title visible"]}
+                    ex = await pw_engine.run_flow_pw(run_id, browser, storage_state_path, config, flow, spec, on_step)
+                    ex["worker"] = worker_id
+                    return ex
+            finally:
+                worker_slots.put_nowait(worker_id)
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            try:
+                tasks = [asyncio.create_task(run_one(browser, spec)) for spec in specs]
+                for coro in asyncio.as_completed(tasks):
+                    ex = await coro
+                    executions.append(ex)
+                    await self.db.executions.insert_one(dict(ex))
+                    ex.pop("_id", None)
+                    lvl = "success" if ex["status"] == "passed" else "error"
+                    await self.emit(run_id, "RUN", "runner", lvl, "exec_result",
+                                    f"[worker {ex['worker']}] {ex['flow_name']} -> {ex['status'].upper()} ({ex['duration']}s)",
+                                    {"execution": ex})
+            finally:
+                await browser.close()
+
         passed = sum(1 for e in executions if e["status"] == "passed")
         await self.emit(run_id, "RUN", "runner", "info", "stage_complete",
                         f"Execution complete: {passed}/{len(executions)} passed, {len(executions)-passed} failed.")
@@ -520,11 +491,16 @@ class Orchestrator:
 
     async def _safe_llm(self, system, prompt, model, run_id, stage, agent):
         try:
-            data, text = await asyncio.wait_for(llm_json(system, prompt, model, session=run_id), timeout=45)
+            data, text = await asyncio.wait_for(llm_json(system, prompt, model, session=run_id), timeout=75)
+            if data is None:
+                snippet = (text or "").strip()[:120] or "empty response"
+                await self.emit(run_id, stage, agent, "warn", "log",
+                                f"LLM response could not be parsed as JSON ({snippet!r}); using deterministic fallback.")
             return data, text
         except Exception as e:
+            detail = str(e)[:80] or type(e).__name__
             await self.emit(run_id, stage, agent, "warn", "log",
-                            f"LLM call degraded ({str(e)[:80]}); using deterministic fallback.")
+                            f"LLM call degraded ({detail}); using deterministic fallback.")
             return None, ""
 
 
@@ -610,12 +586,3 @@ def _default_rationale(ft, decision):
     if decision == "defect":
         return f"{ft}: valid locator resolved but server/app behavior was wrong — strong genuine-defect signal."
     return f"{ft}: ambiguous signal; flagged for human review rather than asserting a defect."
-
-
-def _error_msg(ft, spec):
-    return {
-        "selector-not-found": f"locator.click: Timeout 30000ms exceeded. Selector `{(spec['selectors'][0]['selector'] if spec['selectors'] else 'button')}` not found.",
-        "assertion-failed": "expect(received).toHaveText(expected)\n  Expected: \"Success\"\n  Received: \"Error processing request\"",
-        "network-5xx": "Request failed with status 500 (Internal Server Error) on POST /api/checkout",
-        "console-exception": "Page threw: Uncaught TypeError: cannot read properties of null (reading 'value')",
-    }.get(ft, "Unknown failure")

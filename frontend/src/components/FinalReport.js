@@ -11,6 +11,10 @@ export default function FinalReport({ report, runId }) {
   const exportReport = async (fmt) => {
     try {
       const res = await fetch(`${API}/runs/${runId}/export?fmt=${fmt}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.detail || `Export failed (${res.status})`);
+      }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -21,8 +25,8 @@ export default function FinalReport({ report, runId }) {
       a.remove();
       URL.revokeObjectURL(url);
       toast.success(`Exported ${fmt.toUpperCase()} report`);
-    } catch (_) {
-      toast.error("Export failed");
+    } catch (err) {
+      toast.error(err.message || "Export failed");
     }
   };
 

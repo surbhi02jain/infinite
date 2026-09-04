@@ -123,7 +123,7 @@ export default function Dashboard() {
         </div>
         <div className="flex items-center gap-4">
           <div className="hidden md:flex items-center gap-2 font-mono text-[11px] text-slate-400">
-            <Cpu className="w-3.5 h-3.5 text-emerald-400" /> gemini-3.5-flash
+            <Cpu className="w-3.5 h-3.5 text-emerald-400" /> sarvam-105b
           </div>
           <div className="flex items-center gap-2 font-mono text-[11px]">
             {live ? (
