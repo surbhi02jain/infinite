@@ -1,4 +1,4 @@
-import { Download, FileJson, FileCode2, RotateCw, ShieldAlert, Gauge, Target } from "lucide-react";
+import { Download, FileJson, FileCode2, RotateCw, ShieldAlert, Gauge, Target, Brain, RefreshCw, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 import { API } from "@/api";
 import { Empty } from "@/components/TestPlanView";
@@ -87,6 +87,47 @@ export default function FinalReport({ report, runId }) {
           ) : <p className="text-[13px] text-emerald-400">✓ No PRD requirements missed by the plan.</p>}
         </div>
       </div>
+
+      {/* pattern insights (agent memory across repeat runs on this target) */}
+      {report.insights && (report.insights.flaky_flows?.length || report.insights.confirmed_regressions?.length || report.insights.unstable_selector_flows?.length) ? (
+        <div>
+          <h4 className="font-mono text-[11px] uppercase tracking-widest text-slate-500 mb-2 flex items-center gap-2">
+            <Brain className="w-3.5 h-3.5 text-cyan-400" /> Pattern Insights (learned across repeat runs)
+          </h4>
+          <div className="grid md:grid-cols-3 gap-4">
+            <div className="rounded-xl border border-slate-800 bg-[#0b111c] p-4">
+              <div className="flex items-center gap-2 mb-2"><RefreshCw className="w-3.5 h-3.5 text-amber-300" /><span className="text-[12px] font-semibold text-slate-200">Flaky Flows</span></div>
+              {report.insights.flaky_flows?.length ? (
+                <ul className="space-y-1">
+                  {report.insights.flaky_flows.map((name, i) => (
+                    <li key={i} className="text-[12px] text-amber-200">▸ {name}</li>
+                  ))}
+                </ul>
+              ) : <p className="text-[12px] text-slate-500">None detected yet.</p>}
+            </div>
+            <div className="rounded-xl border border-slate-800 bg-[#0b111c] p-4">
+              <div className="flex items-center gap-2 mb-2"><ShieldAlert className="w-3.5 h-3.5 text-rose-400" /><span className="text-[12px] font-semibold text-slate-200">Confirmed Regressions</span></div>
+              {report.insights.confirmed_regressions?.length ? (
+                <ul className="space-y-1">
+                  {report.insights.confirmed_regressions.map((r, i) => (
+                    <li key={i} className="text-[12px] text-rose-200">▸ {r.flow_name} ({r.fail_type}) — seen {r.count}x</li>
+                  ))}
+                </ul>
+              ) : <p className="text-[12px] text-slate-500">None detected yet.</p>}
+            </div>
+            <div className="rounded-xl border border-slate-800 bg-[#0b111c] p-4">
+              <div className="flex items-center gap-2 mb-2"><Wand2 className="w-3.5 h-3.5 text-violet-400" /><span className="text-[12px] font-semibold text-slate-200">Chronically Unstable Selectors</span></div>
+              {report.insights.unstable_selector_flows?.length ? (
+                <ul className="space-y-1">
+                  {report.insights.unstable_selector_flows.map((u, i) => (
+                    <li key={i} className="text-[12px] text-violet-200">▸ {u.flow_name} — healed {u.heal_count}x</li>
+                  ))}
+                </ul>
+              ) : <p className="text-[12px] text-slate-500">None detected yet.</p>}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {/* defect matrix */}
       <div>
