@@ -1,8 +1,9 @@
 import { useRef, useEffect, useState } from "react";
-import { Terminal, Trash2, ArrowDownToLine, Download } from "lucide-react";
+import { motion } from "framer-motion";
+import { Terminal, Trash2, ListEnd, Download, PanelRightClose, PanelRightOpen } from "lucide-react";
 import { toast } from "sonner";
 import { STAGE_META } from "@/api";
-import { Button } from "@/components/ui/button";
+import TipIconButton from "@/components/TipIconButton";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
@@ -16,6 +17,7 @@ export default function EventConsole({ events, live }) {
   const [filter, setFilter] = useState("all");
   const [autoScroll, setAutoScroll] = useState(true);
   const [cleared, setCleared] = useState(0);
+  const [collapsed, setCollapsed] = useState(false);
   const endRef = useRef(null);
 
   const visible = events.filter((e, i) => i >= cleared && (filter === "all" || e.stage === filter || e.level === filter));
@@ -30,7 +32,7 @@ export default function EventConsole({ events, live }) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `autoqa-events-${Date.now()}.json`;
+      a.download = `qalchemist-events-${Date.now()}.json`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -40,6 +42,22 @@ export default function EventConsole({ events, live }) {
       toast.error("Export failed");
     }
   };
+
+  if (collapsed) {
+    return (
+      <div data-testid="live-event-stream-container-collapsed"
+        className="w-10 shrink-0 flex flex-col items-center gap-3 pt-3 bg-[#070b12] border-l border-slate-800/80">
+        <TipIconButton data-testid="event-stream-expand-button" label="Expand Decision Stream" side="left"
+          onClick={() => setCollapsed(false)} className="text-slate-400 hover:text-emerald-400">
+          <PanelRightOpen className="w-4 h-4" />
+        </TipIconButton>
+        {live && <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse shrink-0" />}
+        <span className="font-mono text-[10px] text-slate-500 tracking-widest uppercase [writing-mode:vertical-rl]">
+          Decision Stream
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div data-testid="live-event-stream-container" className="w-[360px] xl:w-[440px] shrink-0 flex flex-col bg-[#070b12] border-l border-slate-800/80">
@@ -59,20 +77,26 @@ export default function EventConsole({ events, live }) {
               <SelectItem value="warn">Warnings</SelectItem>
             </SelectContent>
           </Select>
-          <Button data-testid="event-stream-autoscroll-button" size="icon" variant="ghost"
+          <TipIconButton data-testid="event-stream-autoscroll-button"
+            label={autoScroll ? "Auto-scroll: on (following latest)" : "Auto-scroll: off (click to follow latest)"}
             onClick={() => setAutoScroll(!autoScroll)}
-            className={`h-7 w-7 ${autoScroll ? "text-emerald-400" : "text-slate-500"}`}>
-            <ArrowDownToLine className="w-3.5 h-3.5" />
-          </Button>
-          <Button data-testid="event-stream-download-button" size="icon" variant="ghost"
+            className={autoScroll ? "text-emerald-400" : "text-slate-500"}>
+            <ListEnd className="w-3.5 h-3.5" />
+          </TipIconButton>
+          <TipIconButton data-testid="event-stream-download-button" label="Export visible events as JSON"
             onClick={exportEvents} disabled={visible.length === 0}
-            className="h-7 w-7 text-slate-500 hover:text-emerald-400 disabled:opacity-40 disabled:pointer-events-none">
+            className="text-slate-500 hover:text-emerald-400 disabled:opacity-40 disabled:pointer-events-none">
             <Download className="w-3.5 h-3.5" />
-          </Button>
-          <Button data-testid="event-stream-clear-button" size="icon" variant="ghost"
-            onClick={() => setCleared(events.length)} className="h-7 w-7 text-slate-500 hover:text-rose-400">
+          </TipIconButton>
+          <TipIconButton data-testid="event-stream-clear-button" label="Clear from view"
+            onClick={() => setCleared(events.length)} className="text-slate-500 hover:text-rose-400">
             <Trash2 className="w-3.5 h-3.5" />
-          </Button>
+          </TipIconButton>
+          <div className="w-px h-4 bg-slate-800 mx-0.5" />
+          <TipIconButton data-testid="event-stream-collapse-button" label="Collapse Decision Stream"
+            onClick={() => setCollapsed(true)} className="text-slate-500 hover:text-emerald-400">
+            <PanelRightClose className="w-3.5 h-3.5" />
+          </TipIconButton>
         </div>
       </div>
 
@@ -81,13 +105,14 @@ export default function EventConsole({ events, live }) {
         {visible.map((e) => {
           const meta = STAGE_META[e.stage] || {};
           return (
-            <div key={e.id} className="animate-fadein flex gap-2 items-start">
+            <motion.div key={e.id} initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }}
+              transition={{ duration: 0.25, ease: "easeOut" }} className="flex gap-2 items-start">
               <span className="text-slate-600 shrink-0">{new Date(e.ts).toLocaleTimeString("en-US", { hour12: false })}</span>
               <span className={`shrink-0 px-1 rounded ${meta.bg || "bg-slate-800"} ${meta.text || "text-slate-400"} text-[9px] font-bold uppercase w-[62px] text-center`}>
                 {meta.agent || e.agent}
               </span>
               <span className={`${LEVEL_COLOR[e.level] || "text-slate-300"} break-words`}>{e.message}</span>
-            </div>
+            </motion.div>
           );
         })}
         <div ref={endRef} />

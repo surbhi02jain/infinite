@@ -1,4 +1,4 @@
-"""AutoQA backend API tests: runs CRUD, pipeline progression, SSE, export, pause/resume, validation."""
+"""QAlchemist backend API tests: runs CRUD, pipeline progression, SSE, export, pause/resume, validation."""
 import os
 import json
 import time

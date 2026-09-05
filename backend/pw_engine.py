@@ -18,10 +18,10 @@ ARTIFACTS_ROOT.mkdir(exist_ok=True)
 
 DUMMY_VALUES = {
     "email": "autoqa.tester+{n}@example.com",
-    "password": "AutoQA-Test-Pass-1!",
+    "password": "QAlchemist-Test-Pass-1!",
     "tel": "5555550123",
     "number": "1",
-    "text": "AutoQA Test Value",
+    "text": "QAlchemist Test Value",
     "search": "test",
 }
 
@@ -61,7 +61,7 @@ async def explore_target_pw(run_id: str, url: str, login_url: str = None,
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={"width": 1280, "height": 900},
-                                             user_agent="AutoQA-Explorer/2.0 (+Playwright)")
+                                             user_agent="QAlchemist-Explorer/2.0 (+Playwright)")
 
         if login_url and username and password:
             ok, err = await _attempt_login(context, login_url, username, password)
@@ -97,10 +97,15 @@ async def explore_target_pw(run_id: str, url: str, login_url: str = None,
                     if href not in visited and href not in to_visit and len(to_visit) < max_pages * 3:
                         to_visit.append(href)
 
-                buttons = await page.eval_on_selector_all(
+                button_els = await page.eval_on_selector_all(
                     "button, [role=button], input[type=submit], input[type=button]",
-                    "els => els.slice(0,30).map(e => (e.textContent||e.value||e.getAttribute('aria-label')||'').trim().slice(0,40))")
-                page_data["buttons"] = [b for b in buttons if b]
+                    "els => els.slice(0,30).map(e => ({text: (e.textContent||e.value||e.getAttribute('aria-label')||'').trim().slice(0,40), "
+                    "selector: e.getAttribute('data-testid')||e.id||''}))")
+                page_data["buttons"] = [b["text"] for b in button_els if b["text"]]
+                # separate from the text-only list above (kept for backward-compat display) — real
+                # id/data-testid so GENERATE can validate an LLM-proposed button selector against
+                # what's actually on the page instead of just pattern-matching the word "button".
+                page_data["button_selectors"] = [b for b in button_els if b["selector"]]
 
                 inputs = await page.eval_on_selector_all(
                     "input, textarea, select",
@@ -274,12 +279,22 @@ async def _fill_visible_inputs(page, n_seed):
     return filled
 
 
+_URL_IN_STEP_RE = re.compile(r"https?://\S+")
+
+
 async def _execute_step(page, step_text, spec_selectors, base_url, prev_url):
     t = step_text.lower()
     try:
-        if any(k in t for k in ("navigate", "go to", "visit")):
-            path_m = re.search(r"(/[\w\-\/\.]+)", step_text)
-            target = urljoin(base_url, path_m.group(1)) if path_m else base_url
+        url_m = _URL_IN_STEP_RE.search(step_text)
+        # A literal URL in the step text (e.g. "Open https://.../add_remove_elements/") is
+        # unambiguous navigation intent, even if the URL happens to contain a word ("add", in that
+        # example) that would otherwise match the click-keyword check below and misfire a click on
+        # whatever selector happens to be first in the spec instead of just navigating there.
+        if url_m or any(k in t for k in ("navigate", "go to", "visit")):
+            target = url_m.group(0) if url_m else None
+            if target is None:
+                path_m = re.search(r"(/[\w\-\/\.]+)", step_text)
+                target = urljoin(base_url, path_m.group(1)) if path_m else base_url
             resp = await page.goto(target, wait_until="domcontentloaded", timeout=15000)
             if resp and resp.status >= 500:
                 return {"ok": False, "fail_type": "network-5xx", "error": f"{target} responded {resp.status}"}

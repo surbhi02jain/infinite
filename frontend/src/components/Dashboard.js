@@ -17,6 +17,7 @@ export default function Dashboard() {
   const [events, setEvents] = useState([]);
   const [showForm, setShowForm] = useState(true);
   const [live, setLive] = useState(false);
+  const [activeTab, setActiveTab] = useState("plan");
   const connRef = useRef(null);
   const pollRef = useRef(null);
   const seqRef = useRef(0);
@@ -71,6 +72,7 @@ export default function Dashboard() {
     activeRef.current = runId;
     setActiveRunId(runId);
     setShowForm(false);
+    setActiveTab("plan");
     setEvents([]);
     seqRef.current = 0;
     const { data } = await api.get(`/runs/${runId}`);
@@ -117,7 +119,7 @@ export default function Dashboard() {
             <Zap className="w-4 h-4 text-[#07090e]" strokeWidth={2.5} />
           </div>
           <div>
-            <h1 className="font-heading text-lg font-bold tracking-tight leading-none">AutoQA</h1>
+            <h1 className="font-heading text-lg font-bold tracking-tight leading-none">QAlchemist</h1>
             <div className="font-mono text-[10px] text-slate-500 tracking-widest uppercase">Autonomous Test Orchestration</div>
           </div>
         </div>
@@ -144,7 +146,7 @@ export default function Dashboard() {
       </header>
 
       <div className="flex-1 flex overflow-hidden">
-        <RunsSidebar runs={runs} activeRunId={activeRunId} onSelect={openRun} onNew={newRun} />
+        <RunsSidebar runs={runs} activeRunId={activeRunId} onSelect={openRun} />
 
         <main className="flex-1 flex flex-col overflow-hidden bg-[#07090e]">
           {showForm ? (
@@ -152,10 +154,12 @@ export default function Dashboard() {
           ) : (
             <>
               <PipelineDAG stageStatus={derived.stageStatus} stageDuration={derived.stageDuration}
-                run={run} awaiting={derived.awaiting} onResume={resume} />
+                run={run} awaiting={derived.awaiting} onResume={resume}
+                activeTab={activeTab} onStageClick={setActiveTab} />
               <div className="flex-1 flex overflow-hidden">
                 <div className="flex-1 overflow-hidden flex flex-col border-r border-slate-800/80">
-                  <WorkspaceTabs derived={derived} runId={activeRunId} run={run} />
+                  <WorkspaceTabs derived={derived} runId={activeRunId} run={run}
+                    activeTab={activeTab} onTabChange={setActiveTab} />
                 </div>
                 <EventConsole events={events} live={live} />
               </div>

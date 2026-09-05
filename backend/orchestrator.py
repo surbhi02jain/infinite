@@ -1,10 +1,11 @@
-"""AutoQA meta-agent orchestrator: EXPLORE -> PLAN -> EVALUATE -> GENERATE -> RUN -> HEAL -> REPORT."""
+"""QAlchemist meta-agent orchestrator: EXPLORE -> PLAN -> EVALUATE -> GENERATE -> RUN -> HEAL -> REPORT."""
 import os
 import re
 import json
 import uuid
 import asyncio
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import httpx
 from playwright.async_api import async_playwright
@@ -32,6 +33,8 @@ def now_iso():
 # ----------------------------------------------------------------------------
 async def llm_json(system: str, prompt: str, model: str = DEFAULT_MODEL, session: str = None):
     """Call Sarvam AI's OpenAI-compatible chat completions endpoint and parse JSON out of the reply."""
+    if not SARVAM_API_KEY:
+        raise RuntimeError("SARVAM_API_KEY not configured")
     async with httpx.AsyncClient(timeout=55) as client:
         resp = await client.post(
             SARVAM_API_URL,
@@ -146,7 +149,20 @@ class Orchestrator:
 
             surface = await self._stage_explore(run_id, config)
             plan = await self._stage_plan(run_id, config, surface, m("planner"))
-            plan = await self._stage_evaluate(run_id, config, surface, plan, m("evaluator"))
+            plan, evaluation = await self._stage_evaluate(run_id, config, surface, plan, m("evaluator"))
+
+            # meta-agent decision: a real audit finding found serious gaps -> re-invoke the Planner
+            # once with that feedback before locking the plan, rather than generating tests for a
+            # plan the evaluator itself flagged as incomplete.
+            high_gaps = [g for g in evaluation.get("coverage_gaps", []) if str(g.get("severity", "")).lower() == "high"]
+            if high_gaps or evaluation.get("prd_gaps"):
+                await self.emit(run_id, "EVALUATE", "meta", "warn", "decision",
+                                f"Meta-agent decision: {len(high_gaps)} high-severity coverage gap(s) and "
+                                f"{len(evaluation.get('prd_gaps', []))} PRD gap(s) found — escalating back to the "
+                                "Planner with this feedback before generation, instead of proceeding on an "
+                                "incomplete plan.")
+                plan = await self._stage_plan(run_id, config, surface, m("planner"), feedback=evaluation)
+                plan, evaluation = await self._stage_evaluate(run_id, config, surface, plan, m("evaluator"), second_pass=True)
 
             # optional pause gate
             if config.get("pause_after_plan"):
@@ -166,7 +182,7 @@ class Orchestrator:
 
             specs = await self._stage_generate(run_id, config, surface, plan, m("generator"))
             executions = await self._stage_run(run_id, config, surface, specs)
-            healer = await self._stage_heal(run_id, config, surface, executions, m("healer"))
+            healer = await self._stage_heal(run_id, config, surface, executions, specs, m("healer"))
             await self._stage_report(run_id, config, surface, plan, specs, executions, healer)
 
             await self.db.runs.update_one({"id": run_id}, {"$set": {"status": "completed", "finished_at": now_iso()}})
@@ -213,10 +229,12 @@ class Orchestrator:
         return surface
 
     # ---- PLAN ----
-    async def _stage_plan(self, run_id, config, surface, model):
+    async def _stage_plan(self, run_id, config, surface, model, feedback=None):
         await self.set_stage(run_id, "PLAN", "running")
+        label = "re-planning" if feedback else "synthesizing"
         await self.emit(run_id, "PLAN", "planner", "info", "stage_start",
-                        f"Planner ({model}) synthesizing user-flow test plan...")
+                        f"Planner ({model}) {label} user-flow test plan"
+                        f"{' with evaluator feedback' if feedback else ''}...")
         system = ("You are an expert QA test planner. Given a web app's discovered surface, produce meaningful "
                   "end-to-end test flows including happy paths, edge cases, and error/negative paths. "
                   "Return ONLY JSON: {\"flows\":[{\"flow_id\":\"F1\",\"name\":\"...\",\"type\":\"happy|edge|error\","
@@ -224,12 +242,17 @@ class Orchestrator:
                   "\"selectors\":[\"...\"]}]}. 5-7 flows.")
         prompt = (f"TARGET SURFACE:\n{surface_summary(surface)}\n\n"
                   f"PRD:\n{config.get('prd') or 'none provided'}\n\n"
-                  f"NL TEST INTENT:\n{config.get('intent') or 'none'}\n\nProduce the test plan JSON.")
+                  f"NL TEST INTENT:\n{config.get('intent') or 'none'}\n\n")
+        if feedback:
+            prompt += (f"A PLAN EVALUATOR AUDITED YOUR PREVIOUS PLAN AND FOUND THESE GAPS — the new plan MUST "
+                       f"address them explicitly:\n{json.dumps(feedback)[:1500]}\n\n")
+        prompt += "Produce the test plan JSON."
         data, _ = await self._safe_llm(system, prompt, model, run_id, "PLAN", "planner")
         flows = (data or {}).get("flows") if isinstance(data, dict) else data
         if not flows:
             flows = _fallback_flows(surface)
         for i, f in enumerate(flows):
+            _normalize_flow(f)
             f.setdefault("flow_id", f"F{i+1}")
             await self.emit(run_id, "PLAN", "planner", "info", "plan_flow",
                             f"[{f['type'].upper()}] {f['name']}", {"flow": f})
@@ -244,7 +267,7 @@ class Orchestrator:
         return flows
 
     # ---- EVALUATE ----
-    async def _stage_evaluate(self, run_id, config, surface, flows, model):
+    async def _stage_evaluate(self, run_id, config, surface, flows, model, second_pass=False):
         await self.set_stage(run_id, "EVALUATE", "running")
         await self.emit(run_id, "EVALUATE", "evaluator", "info", "stage_start",
                         f"Plan Evaluator ({model}) auditing coverage gaps before generation...")
@@ -257,7 +280,17 @@ class Orchestrator:
         prompt = (f"SURFACE:\n{surface_summary(surface)}\n\nCURRENT PLAN:\n{json.dumps(flows)[:4000]}\n\n"
                   f"PRD:\n{config.get('prd') or 'none'}\n\nAudit now.")
         data, _ = await self._safe_llm(system, prompt, model, run_id, "EVALUATE", "evaluator")
-        data = data if isinstance(data, dict) else {}
+        data = data if isinstance(data, dict) and data else None
+        if data is None:
+            data = _fallback_evaluation(surface, flows, config.get("prd"))
+            await self.emit(run_id, "EVALUATE", "evaluator", "info", "log",
+                            "LLM audit unavailable; using heuristic coverage-gap analysis "
+                            "(discovered-surface + PRD-keyword matching) so the audit stage never goes silent.")
+        if second_pass:
+            # don't re-append flows the previous pass already added
+            existing_names = {f.get("name", "").lower() for f in flows}
+            data["added_flows"] = [f for f in (data.get("added_flows") or [])
+                                   if f.get("name", "").lower() not in existing_names]
         for g in data.get("coverage_gaps", []):
             await self.emit(run_id, "EVALUATE", "evaluator", "warn", "gap",
                             f"[{str(g.get('severity','')).upper()}] {g.get('area','')}: {g.get('detail','')}", {"gap": g})
@@ -266,6 +299,7 @@ class Orchestrator:
             await self.emit(run_id, "EVALUATE", "evaluator", "warn", "prd_gap", f"PRD gap: {pg}", {})
         added = data.get("added_flows", []) or []
         for i, f in enumerate(added):
+            _normalize_flow(f)
             f.setdefault("flow_id", f"F{len(flows)+i+1}")
             f["added_by_evaluator"] = True
             flows.append(f)
@@ -282,7 +316,7 @@ class Orchestrator:
                         f"Audit complete: {len(data.get('coverage_gaps', []))} gaps, "
                         f"{len(added)} flows auto-added. Coverage hardened.", {"evaluation": data})
         await self.set_stage(run_id, "EVALUATE", "done")
-        return flows
+        return flows, data
 
     # ---- GENERATE ----
     async def _stage_generate(self, run_id, config, surface, flows, model):
@@ -304,10 +338,17 @@ class Orchestrator:
             data = data if isinstance(data, dict) else {}
             code = data.get("code") or _fallback_spec(f, config["url"])
             filename = data.get("filename") or f"{_slug(f['name'])}.spec.js"
+            # the LLM (in PLAN or here) occasionally returns "selectors" as a plain string instead
+            # of a JSON array despite the schema asking for one — iterating a string in Python walks
+            # it character-by-character, silently producing garbage single-char "selectors", so coerce.
             sels = data.get("selectors") or f.get("selectors") or []
+            if isinstance(sels, str):
+                sels = [sels] if sels.strip() else []
             # live selector validation against discovered surface
             validated = []
             for s in sels:
+                if not isinstance(s, str) or not s.strip():
+                    continue
                 ok = _selector_valid(s, known_selectors)
                 validated.append({"selector": s, "status": "verified" if ok else "fallback"})
                 await self.emit(run_id, "GENERATE", "generator", "info" if ok else "warn", "selector_check",
@@ -388,79 +429,126 @@ class Orchestrator:
         return executions
 
     # ---- HEAL ----
-    async def _stage_heal(self, run_id, config, surface, executions, model):
+    async def _stage_heal(self, run_id, config, surface, executions, specs, model):
         await self.set_stage(run_id, "HEAL", "running")
         failures = [e for e in executions if e["status"] == "failed"]
         known = _known_selectors(surface)
+        spec_by_flow = {s["flow_id"]: s for s in specs}
+        storage_state_path = surface.get("storage_state_path")
         await self.emit(run_id, "HEAL", "healer", "info", "stage_start",
                         f"Healer analyzing {len(failures)} failures (heuristic rules + {model} classification)...")
         actions = []
-        for e in failures:
-            ft = e.get("fail_type")
-            # heuristic-first decision — deterministic for clear signals
-            if ft == "selector-not-found":
-                forced, base_conf = "script", 0.91
-            elif ft in ("network-5xx", "console-exception"):
-                forced, base_conf = "defect", 0.9
-            else:  # assertion-failed -> ambiguous, let LLM arbitrate
-                forced, base_conf = None, 0.7
-            system = ("You are a self-healing test classifier. Decide if a failed test is a SCRIPT issue "
-                      "(heal it) or a genuine APP DEFECT, or NEEDS REVIEW. When it is a SCRIPT issue, propose a "
-                      "concrete stable replacement locator using the provided known-good selectors. Return ONLY JSON: "
-                      "{\"decision\":\"script|defect|review\",\"confidence\":0.0-1.0,\"rationale\":\"...\","
-                      "\"heal\":{\"old_selector\":\"...\",\"new_selector\":\"...\"},"
-                      "\"severity\":\"critical|high|medium|low\"}")
-            # only invoke the LLM for genuinely ambiguous signals (assertion-failed);
-            # clear signals are resolved deterministically to stay fast & within rate limits
-            if forced is None:
-                prompt = (f"FLOW: {e['flow_name']} ({e['flow_type']})\nFAIL TYPE: {ft}\nERROR: {e.get('error')}\n"
-                          f"CONSOLE: {e.get('console_errors')}\nNETWORK: {e.get('network')}\n"
-                          f"KNOWN-GOOD SELECTORS ON PAGE: {json.dumps(known[:20])}\n"
-                          "Classify as script (heal), defect, or review, and if script propose a heal.")
-                data, _ = await self._safe_llm(system, prompt, model, run_id, "HEAL", "healer")
-                data = data if isinstance(data, dict) else {}
-            else:
-                data = {}
-            decision = forced or (data.get("decision") or "review")
-            confidence = float(data.get("confidence") or base_conf)
-            rationale = data.get("rationale") or _default_rationale(ft, decision)
-            heal = data.get("heal") or {}
-            if decision == "script" and not heal.get("new_selector"):
-                old_sel = e.get("error", "").split("`")[1] if "`" in e.get("error", "") else "stale locator"
-                new_sel = next((k for k in known if "data-testid" in k), None) or f"getByRole('button', {{ name: /submit/i }})"
-                heal = {"old_selector": old_sel, "new_selector": new_sel}
-            action = {"id": str(uuid.uuid4()), "run_id": run_id, "execution_id": e["id"], "flow_id": e["flow_id"],
-                      "flow_name": e["flow_name"], "fail_type": ft, "decision": decision,
-                      "confidence": round(confidence, 2), "rationale": rationale,
-                      "heal": heal, "severity": data.get("severity") or ("high" if decision == "defect" else "low")}
-            if decision == "script":
-                action["healed"] = True
-                # simulate re-run success after heal
-                new_status = "passed"
-                action["result"] = "Re-located element and patched spec. Re-run PASSED."
-                await self.db.executions.update_one({"id": e["id"]}, {"$set": {"final_status": "healed", "healed": True}})
-                await self.emit(run_id, "HEAL", "healer", "success", "healer_action",
-                                f"HEALED {e['flow_name']}: {action['heal'].get('old_selector','selector')} -> "
-                                f"{action['heal'].get('new_selector','stable locator')} | re-run PASSED "
-                                f"(conf {action['confidence']})", {"action": action})
-            elif decision == "defect":
-                defect = {"id": str(uuid.uuid4()), "run_id": run_id, "flow_id": e["flow_id"],
-                          "flow_name": e["flow_name"], "fail_type": ft, "confidence": action["confidence"],
-                          "severity": action["severity"], "rationale": rationale}
-                await self.db.defects.insert_one(dict(defect))
-                await self.db.executions.update_one({"id": e["id"]}, {"$set": {"final_status": "defect"}})
-                await self.emit(run_id, "HEAL", "healer", "error", "healer_action",
-                                f"APP DEFECT flagged in {e['flow_name']} [{action['severity'].upper()}] "
-                                f"(conf {action['confidence']}): {rationale}", {"action": action})
-            else:
-                await self.db.executions.update_one({"id": e["id"]}, {"$set": {"final_status": "review"}})
-                await self.emit(run_id, "HEAL", "healer", "warn", "healer_action",
-                                f"NEEDS REVIEW {e['flow_name']} (conf {action['confidence']}): {rationale}",
-                                {"action": action})
-            await self.db.healer_actions.insert_one(dict(action))
-            action.pop("_id", None)
-            actions.append(action)
-            await asyncio.sleep(0.3)
+        # a proposed "script" heal is only provisional until replayed in a live browser — lazily
+        # launch one shared Chromium instance for the whole stage rather than per-heal.
+        replay_pw, replay_browser = None, None
+        try:
+            for e in failures:
+                ft = e.get("fail_type")
+                # heuristic-first decision — deterministic for clear signals
+                if ft == "selector-not-found":
+                    forced, base_conf = "script", 0.91
+                elif ft in ("network-5xx", "console-exception"):
+                    forced, base_conf = "defect", 0.9
+                else:  # assertion-failed -> ambiguous, let LLM arbitrate
+                    forced, base_conf = None, 0.7
+                system = ("You are a self-healing test classifier. Decide if a failed test is a SCRIPT issue "
+                          "(heal it) or a genuine APP DEFECT, or NEEDS REVIEW. When it is a SCRIPT issue, propose a "
+                          "concrete stable replacement locator using the provided known-good selectors. Return ONLY "
+                          "JSON: {\"decision\":\"script|defect|review\",\"confidence\":0.0-1.0,\"rationale\":\"...\","
+                          "\"heal\":{\"old_selector\":\"...\",\"new_selector\":\"...\"},"
+                          "\"severity\":\"critical|high|medium|low\"}")
+                # only invoke the LLM for genuinely ambiguous signals (assertion-failed);
+                # clear signals are resolved deterministically to stay fast & within rate limits
+                if forced is None:
+                    prompt = (f"FLOW: {e['flow_name']} ({e['flow_type']})\nFAIL TYPE: {ft}\nERROR: {e.get('error')}\n"
+                              f"CONSOLE: {e.get('console_errors')}\nNETWORK: {e.get('network')}\n"
+                              f"KNOWN-GOOD SELECTORS ON PAGE: {json.dumps(known[:20])}\n"
+                              "Classify as script (heal), defect, or review, and if script propose a heal.")
+                    data, _ = await self._safe_llm(system, prompt, model, run_id, "HEAL", "healer")
+                    data = data if isinstance(data, dict) else {}
+                else:
+                    data = {}
+                decision = forced or (data.get("decision") or "review")
+                confidence = float(data.get("confidence") or base_conf)
+                rationale = data.get("rationale") or _default_rationale(ft, decision)
+                heal = data.get("heal") or {}
+                if decision == "script" and not heal.get("new_selector"):
+                    old_sel = e.get("error", "").split("`")[1] if "`" in e.get("error", "") else "stale locator"
+                    new_sel = (next((k for k in known if "data-testid" in k), None)
+                               or "getByRole('button', { name: /submit/i })")
+                    heal = {"old_selector": old_sel, "new_selector": new_sel}
+                action = {"id": str(uuid.uuid4()), "run_id": run_id, "execution_id": e["id"], "flow_id": e["flow_id"],
+                          "flow_name": e["flow_name"], "fail_type": ft, "decision": decision,
+                          "confidence": round(confidence, 2), "rationale": rationale,
+                          "heal": heal, "severity": data.get("severity") or ("high" if decision == "defect" else "low")}
+
+                if decision == "script":
+                    # actually replay the flow in a live browser with the proposed selector patched
+                    # in, instead of assuming the heal worked — a fix that doesn't verify is not a fix.
+                    spec = spec_by_flow.get(e["flow_id"])
+                    replay_ex, replay_err = None, None
+                    if spec and heal.get("new_selector"):
+                        try:
+                            if replay_browser is None:
+                                replay_pw = await async_playwright().start()
+                                replay_browser = await replay_pw.chromium.launch(headless=True)
+                            patched_spec = dict(spec)
+                            patched_spec["selectors"] = (
+                                [{"selector": heal["new_selector"], "status": "healed"}]
+                                + list(spec.get("selectors", [])))
+                            flow = {"flow_id": spec["flow_id"], "steps": spec.get("flow_steps") or []}
+                            replay_ex = await pw_engine.run_flow_pw(
+                                run_id, replay_browser, storage_state_path, config, flow, patched_spec, on_step=None)
+                        except Exception as ex:
+                            replay_err = str(ex)[:150]
+
+                    if replay_ex and replay_ex.get("status") == "passed":
+                        action["healed"] = True
+                        action["result"] = f"Re-located element, replayed the flow in a live browser: PASSED ({replay_ex['duration']}s)."
+                        await self.db.executions.update_one({"id": e["id"]}, {"$set": {
+                            "final_status": "healed", "healed": True,
+                            "artifacts": replay_ex.get("artifacts"), "duration": replay_ex.get("duration")}})
+                        await self.emit(run_id, "HEAL", "healer", "success", "healer_action",
+                                        f"HEALED {e['flow_name']}: {action['heal'].get('old_selector','selector')} -> "
+                                        f"{action['heal'].get('new_selector','stable locator')} | live re-run PASSED "
+                                        f"({replay_ex['duration']}s, conf {action['confidence']})", {"action": action})
+                    else:
+                        # the proposed heal did not actually verify — be honest and escalate rather
+                        # than reporting a fix that didn't happen.
+                        decision = "review"
+                        action["decision"] = "review"
+                        action["healed"] = False
+                        detail = replay_err or (replay_ex or {}).get("error") or "replay still failed"
+                        action["result"] = f"Proposed heal did not verify on live replay ({detail}); escalated for human review."
+                        await self.db.executions.update_one({"id": e["id"]}, {"$set": {"final_status": "review"}})
+                        await self.emit(run_id, "HEAL", "healer", "warn", "healer_action",
+                                        f"HEAL ATTEMPTED for {e['flow_name']} but did not verify on live replay "
+                                        f"({detail}) — escalating to review instead of reporting a false fix.",
+                                        {"action": action})
+                elif decision == "defect":
+                    defect = {"id": str(uuid.uuid4()), "run_id": run_id, "flow_id": e["flow_id"],
+                              "flow_name": e["flow_name"], "fail_type": ft, "confidence": action["confidence"],
+                              "severity": action["severity"], "rationale": rationale}
+                    await self.db.defects.insert_one(dict(defect))
+                    await self.db.executions.update_one({"id": e["id"]}, {"$set": {"final_status": "defect"}})
+                    await self.emit(run_id, "HEAL", "healer", "error", "healer_action",
+                                    f"APP DEFECT flagged in {e['flow_name']} [{action['severity'].upper()}] "
+                                    f"(conf {action['confidence']}): {rationale}", {"action": action})
+                else:
+                    await self.db.executions.update_one({"id": e["id"]}, {"$set": {"final_status": "review"}})
+                    await self.emit(run_id, "HEAL", "healer", "warn", "healer_action",
+                                    f"NEEDS REVIEW {e['flow_name']} (conf {action['confidence']}): {rationale}",
+                                    {"action": action})
+                await self.db.healer_actions.insert_one(dict(action))
+                action.pop("_id", None)
+                actions.append(action)
+                await asyncio.sleep(0.1)
+        finally:
+            if replay_browser:
+                await replay_browser.close()
+            if replay_pw:
+                await replay_pw.stop()
+
         await self.emit(run_id, "HEAL", "healer", "success", "stage_complete",
                         f"Healer done: {sum(1 for a in actions if a['decision']=='script')} healed, "
                         f"{sum(1 for a in actions if a['decision']=='defect')} defects, "
@@ -522,6 +610,19 @@ class Orchestrator:
 # ----------------------------------------------------------------------------
 # Fallback generators (keep demo reliable even if LLM degrades)
 # ----------------------------------------------------------------------------
+def _normalize_flow(f: dict):
+    """The LLM occasionally returns "steps"/"selectors" as a single string instead of the requested
+    JSON array despite the schema. Iterating a raw string in Python walks it character-by-character,
+    which silently turns one flow into dozens of garbage single-character steps/selectors — coerce in
+    place so every downstream consumer (GENERATE, RUN, HEAL) sees a real list."""
+    for key in ("steps", "selectors"):
+        v = f.get(key)
+        if isinstance(v, str):
+            f[key] = [v] if v.strip() else []
+        elif not isinstance(v, list):
+            f[key] = []
+
+
 def _slug(s):
     return re.sub(r"[^a-z0-9]+", "-", (s or "flow").lower()).strip("-")[:40] or "flow"
 
@@ -533,6 +634,9 @@ def _known_selectors(surface):
         for i in p.get("inputs", []):
             sels.append(f"[data-testid=\"{i['selector']}\"]")
             sels.append(f"#{i['selector']}")
+        for bs in p.get("button_selectors", []):
+            sels.append(f"[data-testid=\"{bs['selector']}\"]")
+            sels.append(f"#{bs['selector']}")
         for b in p.get("buttons", []):
             if b:
                 sels.append(f"text={b}")
@@ -551,35 +655,137 @@ ROBUST_PATTERNS = re.compile(
     r"\b(a|nav|main|form|input|button|h1|h2|header|footer|section|body)\b", re.I)
 
 
+_ID_OR_TESTID_RE = re.compile(r"#([\w\-]+)|data-testid=[\"']?([\w\-]+)")
+
+
 def _selector_valid(sel, known):
     s = sel.lower()
+    # an #id or [data-testid=...] is a specific, falsifiable claim about the DOM, so it must actually
+    # match a real discovered identifier — not just get waved through because the selector also
+    # contains a generic tag-name word (e.g. "button#add_element_button" starts with the literal
+    # word "button", which used to satisfy ROBUST_PATTERNS below regardless of whether the id was
+    # ever seen on the real page, letting the LLM's hallucinated ids pass as "verified").
+    id_m = _ID_OR_TESTID_RE.search(sel)
+    if id_m:
+        ident = (id_m.group(1) or id_m.group(2) or "").lower()
+        return bool(ident) and any(ident in k.lower() for k in known)
     if any(k.lower() in s or s in k.lower() for k in known):
         return True
     return bool(ROBUST_PATTERNS.search(s))
 
 
 def _fallback_flows(surface):
+    """Deterministic plan used when the LLM is unavailable. Derived from what EXPLORE actually
+    found (discovered pages/forms) rather than a fixed generic template, so an offline demo still
+    visibly reflects the real target instead of always producing the same three canned flows."""
+    pages = surface.get("pages", [])
     forms = surface.get("forms", [])
+    home_title = (pages[0].get("title") if pages else "") or ""
     flows = [
         {"flow_id": "F1", "name": "Homepage loads and primary nav renders", "type": "happy", "priority": "high",
          "steps": ["Navigate to base URL", "Assert page title visible", "Assert primary nav links present"],
-         "expected_outcome": "Landing page renders with navigation", "selectors": ["getByRole('navigation')"]},
-        {"flow_id": "F2", "name": "Primary call-to-action navigation", "type": "happy", "priority": "medium",
-         "steps": ["Click primary CTA", "Assert URL changed", "Assert target section visible"],
-         "expected_outcome": "User reaches target page", "selectors": ["getByRole('button')"]},
-        {"flow_id": "F3", "name": "Form submission with valid input", "type": "happy", "priority": "high",
-         "steps": ["Fill form fields", "Submit", "Assert success state"],
-         "expected_outcome": "Form accepted", "selectors": ["getByRole('textbox')"]},
-        {"flow_id": "F4", "name": "Form validation rejects empty required fields", "type": "error", "priority": "high",
-         "steps": ["Submit empty form", "Assert validation errors shown"],
-         "expected_outcome": "Validation errors displayed", "selectors": ["getByText('required')"]},
-        {"flow_id": "F5", "name": "404 handling for unknown route", "type": "edge", "priority": "low",
-         "steps": ["Navigate to /nonexistent-xyz", "Assert 404 / not-found state"],
-         "expected_outcome": "Graceful not-found page", "selectors": ["getByText('not found')"]},
+         "expected_outcome": f"Landing page{f' (\"{home_title}\")' if home_title else ''} renders with navigation",
+         "selectors": ["getByRole('navigation')"]},
     ]
-    if not forms:
-        flows = [f for f in flows if "form" not in f["name"].lower()]
+
+    # one flow per additional discovered, successfully-loaded page — ties the fallback plan to the
+    # real crawl instead of ignoring it. Some sites reuse the same <title> across every page, so
+    # fall back to the URL path (always unique) rather than producing duplicate flow names.
+    extra_pages = [p for p in pages[1:] if 200 <= (p.get("status") or 0) < 400][:3]
+    used_titles = {home_title.lower()} if home_title else set()
+    for i, p in enumerate(extra_pages, start=2):
+        path = (urlparse(p["url"]).path or p["url"]).rstrip("/") or "/"
+        title = p.get("title") or ""
+        label = title if title and title.lower() not in used_titles else path
+        used_titles.add(title.lower())
+        flows.append({
+            "flow_id": f"F{i}", "name": f"{label} page loads correctly", "type": "happy", "priority": "medium",
+            "steps": [f"Navigate to {path}", "Assert page title visible"],
+            "expected_outcome": f"{path} renders without a navigation error", "selectors": [],
+        })
+
+    if forms:
+        n = len(flows) + 1
+        flows.append({
+            "flow_id": f"F{n}", "name": "Form submission with valid input", "type": "happy", "priority": "high",
+            "steps": ["Fill form fields", "Submit", "Assert success state"],
+            "expected_outcome": "Form accepted", "selectors": ["getByRole('textbox')"],
+        })
+        flows.append({
+            "flow_id": f"F{n+1}", "name": "Form validation rejects empty required fields", "type": "error",
+            "priority": "high", "steps": ["Submit empty form", "Assert validation errors shown"],
+            "expected_outcome": "Validation errors displayed", "selectors": ["getByText('required')"],
+        })
+    else:
+        # no discovered forms — still cover a generic primary interactive element as a happy path
+        n = len(flows) + 1
+        flows.append({
+            "flow_id": f"F{n}", "name": "Primary call-to-action navigation", "type": "happy", "priority": "medium",
+            "steps": ["Click primary CTA", "Assert URL changed", "Assert target section visible"],
+            "expected_outcome": "User reaches target page", "selectors": ["getByRole('button')"],
+        })
+
+    n = len(flows) + 1
+    flows.append({
+        "flow_id": f"F{n}", "name": "404 handling for unknown route", "type": "edge", "priority": "low",
+        "steps": ["Navigate to /nonexistent-xyz", "Assert 404 / not-found state"],
+        "expected_outcome": "Graceful not-found page", "selectors": ["getByText('not found')"],
+    })
     return flows
+
+
+PRD_FLOW_KEYWORDS = ["login", "log in", "logout", "sign up", "signup", "register", "checkout",
+                     "payment", "cart", "search", "password reset", "profile", "upload", "delete",
+                     "notification", "auth", "dashboard", "subscription", "settings"]
+
+
+def _fallback_evaluation(surface, flows, prd):
+    """Deterministic coverage-gap / PRD-gap audit used when the LLM is unavailable, so EVALUATE — a
+    Must-Have stage — never goes silent just because the model call failed or rate-limited."""
+    flow_text = " ".join((f.get("name", "") + " " + " ".join(f.get("steps", []) or [])) for f in flows).lower()
+    coverage_gaps, prd_gaps, added_flows, risk_notes = [], [], [], []
+
+    forms = surface.get("forms", [])
+    tests_form = any(k in flow_text for k in ("form", "submit", "field"))
+    if forms and not tests_form:
+        coverage_gaps.append({"area": "Forms", "severity": "high",
+                              "detail": f"{len(forms)} form(s) discovered on the surface but no flow in the "
+                                        "plan exercises form submission or validation."})
+        added_flows.append({"name": "Form submission with valid input", "type": "happy", "priority": "high",
+                            "steps": ["Fill form fields", "Submit", "Assert success state"],
+                            "expected_outcome": "Form accepted", "selectors": ["getByRole('textbox')"]})
+
+    if not any(f.get("type") == "error" for f in flows):
+        coverage_gaps.append({"area": "Negative paths", "severity": "medium",
+                              "detail": "No error/negative-path flow in the plan (e.g. invalid input, "
+                                        "empty required fields, unauthorized access)."})
+
+    tested_paths = set()
+    for f in flows:
+        for step in f.get("steps", []) or []:
+            m = re.search(r"(/[\w\-./]+)", step)
+            if m:
+                tested_paths.add(m.group(1).rstrip("/"))
+    untested = [p["url"] for p in surface.get("pages", [])
+               if (urlparse(p["url"]).path or "/").rstrip("/") not in tested_paths
+               and (urlparse(p["url"]).path or "/") not in ("", "/")]
+    if untested:
+        coverage_gaps.append({"area": "Discovered routes", "severity": "medium",
+                              "detail": f"{len(untested)} discovered page(s) not referenced by any flow: "
+                                        f"{', '.join(untested[:3])}"})
+
+    if prd:
+        prd_lower = prd.lower()
+        for kw in PRD_FLOW_KEYWORDS:
+            if kw in prd_lower and kw not in flow_text:
+                prd_gaps.append(f"PRD mentions '{kw}' but no flow in the plan covers it.")
+
+    if len(surface.get("pages", [])) <= 1 and not forms:
+        risk_notes.append("Exploration found a very small surface (single page, no forms) — "
+                          "coverage may be shallow regardless of plan quality.")
+
+    return {"coverage_gaps": coverage_gaps, "prd_gaps": prd_gaps[:5], "added_flows": added_flows,
+            "risk_notes": risk_notes, "missing_edge_cases": []}
 
 
 def _fallback_spec(flow, url):

@@ -29,7 +29,7 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-app = FastAPI(title="AutoQA")
+app = FastAPI(title="QAlchemist")
 api_router = APIRouter(prefix="/api")
 orch = Orchestrator(db)
 
@@ -57,7 +57,7 @@ class RunConfig(BaseModel):
 
 @api_router.get("/")
 async def root():
-    return {"message": "AutoQA orchestration API", "stages": STAGES}
+    return {"message": "QAlchemist orchestration API", "stages": STAGES}
 
 
 @api_router.post("/runs")
@@ -167,9 +167,9 @@ async def export_report(run_id: str, request: Request, fmt: str = "json"):
     if fmt == "html":
         html = build_html_report(run, report, origin=str(request.base_url).rstrip("/"))
         return Response(content=html, media_type="text/html",
-                        headers={"Content-Disposition": f'attachment; filename="autoqa-{run_id[:8]}.html"'})
+                        headers={"Content-Disposition": f'attachment; filename="qalchemist-{run_id[:8]}.html"'})
     return Response(content=json.dumps(report, indent=2, default=str), media_type="application/json",
-                    headers={"Content-Disposition": f'attachment; filename="autoqa-{run_id[:8]}.json"'})
+                    headers={"Content-Disposition": f'attachment; filename="qalchemist-{run_id[:8]}.json"'})
 
 
 app.include_router(api_router)

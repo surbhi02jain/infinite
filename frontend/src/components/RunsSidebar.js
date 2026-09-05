@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { formatDistanceToNow } from "date-fns";
-import { Plus, CircleDot } from "lucide-react";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import TipIconButton from "@/components/TipIconButton";
 
 const STATUS_STYLE = {
   completed: "text-emerald-400 bg-emerald-950/60 border-emerald-500/30",
@@ -9,16 +11,36 @@ const STATUS_STYLE = {
   failed: "text-rose-400 bg-rose-950/60 border-rose-500/30",
 };
 
-export default function RunsSidebar({ runs, activeRunId, onSelect, onNew }) {
+export default function RunsSidebar({ runs, activeRunId, onSelect }) {
+  const [collapsed, setCollapsed] = useState(false);
+
+  if (collapsed) {
+    return (
+      <aside data-testid="runs-sidebar-collapsed"
+        className="w-10 shrink-0 flex flex-col items-center gap-3 pt-3 bg-[#080d16] border-r border-slate-800/80">
+        <TipIconButton data-testid="runs-sidebar-expand-button" label="Expand Run History" side="right"
+          onClick={() => setCollapsed(false)} className="text-slate-400 hover:text-emerald-400">
+          <PanelLeftOpen className="w-4 h-4" />
+        </TipIconButton>
+        {runs.length > 0 && (
+          <span className="font-mono text-[10px] text-slate-500 tracking-widest">{runs.length}</span>
+        )}
+        <span className="font-mono text-[10px] text-slate-500 tracking-widest uppercase [writing-mode:vertical-rl]">
+          Run History
+        </span>
+      </aside>
+    );
+  }
+
   return (
     <aside className="w-72 lg:w-80 border-r border-slate-800/80 bg-[#080d16] flex flex-col shrink-0">
-      <div className="p-4 border-b border-slate-800/80">
-        <button data-testid="sidebar-new-run-button" onClick={onNew}
-          className="w-full flex items-center justify-center gap-2 h-10 rounded-lg border border-dashed border-slate-700 text-slate-300 hover:border-emerald-500/60 hover:text-emerald-400 transition-colors text-sm font-medium">
-          <Plus className="w-4 h-4" /> New Run
-        </button>
+      <div className="px-4 pt-4 pb-2 flex items-center justify-between">
+        <span className="font-mono text-[10px] uppercase tracking-widest text-slate-500">Run History</span>
+        <TipIconButton data-testid="runs-sidebar-collapse-button" label="Collapse Run History"
+          onClick={() => setCollapsed(true)} className="text-slate-500 hover:text-emerald-400">
+          <PanelLeftClose className="w-3.5 h-3.5" />
+        </TipIconButton>
       </div>
-      <div className="px-4 pt-4 pb-2 font-mono text-[10px] uppercase tracking-widest text-slate-500">Run History</div>
       <div data-testid="runs-history-list" className="flex-1 overflow-y-auto px-3 pb-4 space-y-2">
         {runs.length === 0 && <div className="text-slate-600 text-xs px-2 py-4">No runs yet. Launch one to begin.</div>}
         {runs.map((r) => {
