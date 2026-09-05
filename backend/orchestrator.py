@@ -1,4 +1,10 @@
-"""AutoQA meta-agent orchestrator: EXPLORE -> PLAN -> EVALUATE -> GENERATE -> RUN -> HEAL -> REPORT."""
+"""AutoQA meta-agent orchestrator: EXPLORE -> PLAN -> EVALUATE -> GENERATE -> RUN -> HEAL -> REPORT.
+
+The pipeline is wired as a LangGraph StateGraph: each stage is a node that reads/writes a
+shared typed state, and edges express the fixed EXPLORE->...->REPORT flow (with a pause/resume
+gate between EVALUATE and GENERATE). This replaces the previous approach of directly invoking
+the LLM helper inline from a hand-rolled sequence of awaits.
+"""
 import os
 import re
 import json
@@ -6,11 +12,13 @@ import uuid
 import asyncio
 import random
 from datetime import datetime, timezone
+from typing import Any, TypedDict
 from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 from emergentintegrations.llm.chat import LlmChat, UserMessage
+from langgraph.graph import StateGraph, START, END
 
 from event_bus import bus
 
@@ -130,11 +138,89 @@ def surface_summary(surface: dict) -> str:
 
 
 # ----------------------------------------------------------------------------
+# LangGraph state
+# ----------------------------------------------------------------------------
+class GraphState(TypedDict, total=False):
+    run_id: str
+    config: dict
+    surface: dict
+    flows: list
+    specs: list
+    executions: list
+    actions: list
+    report: dict
+
+
+# ----------------------------------------------------------------------------
 # Orchestrator
 # ----------------------------------------------------------------------------
 class Orchestrator:
     def __init__(self, db):
         self.db = db
+        self.graph = self._build_graph()
+
+    def _model(self, config, agent):
+        return (config.get("models") or {}).get(agent, DEFAULT_MODEL)
+
+    def _build_graph(self):
+        g = StateGraph(GraphState)
+        g.add_node("explore", self._node_explore)
+        g.add_node("plan", self._node_plan)
+        g.add_node("evaluate", self._node_evaluate)
+        g.add_node("pause_gate", self._node_pause_gate)
+        g.add_node("generate", self._node_generate)
+        g.add_node("run_tests", self._node_run)
+        g.add_node("heal", self._node_heal)
+        g.add_node("report", self._node_report)
+        g.add_edge(START, "explore")
+        g.add_edge("explore", "plan")
+        g.add_edge("plan", "evaluate")
+        g.add_edge("evaluate", "pause_gate")
+        g.add_edge("pause_gate", "generate")
+        g.add_edge("generate", "run_tests")
+        g.add_edge("run_tests", "heal")
+        g.add_edge("heal", "report")
+        g.add_edge("report", END)
+        return g.compile()
+
+    # ---- node wrappers: thin adapters from GraphState to the existing stage impls ----
+    async def _node_explore(self, state: GraphState) -> dict:
+        surface = await self._stage_explore(state["run_id"], state["config"])
+        return {"surface": surface}
+
+    async def _node_plan(self, state: GraphState) -> dict:
+        flows = await self._stage_plan(state["run_id"], state["config"], state["surface"],
+                                        self._model(state["config"], "planner"))
+        return {"flows": flows}
+
+    async def _node_evaluate(self, state: GraphState) -> dict:
+        flows = await self._stage_evaluate(state["run_id"], state["config"], state["surface"],
+                                            state["flows"], self._model(state["config"], "evaluator"))
+        return {"flows": flows}
+
+    async def _node_pause_gate(self, state: GraphState) -> dict:
+        await self._stage_pause_gate(state["run_id"], state["config"])
+        return {}
+
+    async def _node_generate(self, state: GraphState) -> dict:
+        specs = await self._stage_generate(state["run_id"], state["config"], state["surface"],
+                                            state["flows"], self._model(state["config"], "generator"))
+        return {"specs": specs}
+
+    async def _node_run(self, state: GraphState) -> dict:
+        executions = await self._stage_run(state["run_id"], state["config"], state["specs"])
+        return {"executions": executions}
+
+    async def _node_heal(self, state: GraphState) -> dict:
+        actions = await self._stage_heal(state["run_id"], state["config"], state["surface"],
+                                          state["executions"], self._model(state["config"], "healer"))
+        return {"actions": actions}
+
+    async def _node_report(self, state: GraphState) -> dict:
+        report = await self._stage_report(state["run_id"], state["config"], state["surface"],
+                                           state["flows"], state["specs"], state["executions"],
+                                           state["actions"])
+        return {"report": report}
 
     def _seq(self, run_id):
         n = defaultdict_seq.get(run_id, 0) + 1
@@ -158,41 +244,14 @@ class Orchestrator:
 
     async def run(self, run_id: str, config: dict):
         _resume_events[run_id] = asyncio.Event()
-        models = config.get("models", {})
-
-        def m(agent):
-            return models.get(agent, DEFAULT_MODEL)
-
         try:
             await self.db.runs.update_one({"id": run_id}, {"$set": {"status": "running", "started_at": now_iso()}})
             await self.emit(run_id, "EXPLORE", "meta", "info", "run_start",
                             f"Meta-agent initialized. Target: {config['url']}",
                             {"config": {k: config.get(k) for k in ["url", "login_url", "intent", "budget", "auth_mode"]}})
 
-            surface = await self._stage_explore(run_id, config)
-            plan = await self._stage_plan(run_id, config, surface, m("planner"))
-            plan = await self._stage_evaluate(run_id, config, surface, plan, m("evaluator"))
-
-            # optional pause gate
-            if config.get("pause_after_plan"):
-                await self.set_stage(run_id, "EVALUATE", "awaiting")
-                await self.emit(run_id, "EVALUATE", "meta", "warn", "awaiting_approval",
-                                "Paused for plan approval. Awaiting operator resume.")
-                await self.db.runs.update_one({"id": run_id}, {"$set": {"status": "paused"}})
-                try:
-                    await asyncio.wait_for(_resume_events[run_id].wait(), timeout=300)
-                    await self.emit(run_id, "EVALUATE", "meta", "success", "resumed",
-                                    "Plan approved by operator. Resuming pipeline.")
-                except asyncio.TimeoutError:
-                    await self.emit(run_id, "EVALUATE", "meta", "info", "resumed",
-                                    "Approval timeout reached, auto-proceeding.")
-                await self.set_stage(run_id, "EVALUATE", "done")
-                await self.db.runs.update_one({"id": run_id}, {"$set": {"status": "running"}})
-
-            specs = await self._stage_generate(run_id, config, surface, plan, m("generator"))
-            executions = await self._stage_run(run_id, config, specs)
-            healer = await self._stage_heal(run_id, config, surface, executions, m("healer"))
-            await self._stage_report(run_id, config, surface, plan, specs, executions, healer)
+            initial_state: GraphState = {"run_id": run_id, "config": config}
+            await self.graph.ainvoke(initial_state, {"recursion_limit": 50})
 
             await self.db.runs.update_one({"id": run_id}, {"$set": {"status": "completed", "finished_at": now_iso()}})
             await self.emit(run_id, "REPORT", "meta", "success", "run_complete",
@@ -299,6 +358,24 @@ class Orchestrator:
                         f"{len(added)} flows auto-added. Coverage hardened.", {"evaluation": data})
         await self.set_stage(run_id, "EVALUATE", "done")
         return flows
+
+    # ---- PAUSE GATE ----
+    async def _stage_pause_gate(self, run_id, config):
+        if not config.get("pause_after_plan"):
+            return
+        await self.set_stage(run_id, "EVALUATE", "awaiting")
+        await self.emit(run_id, "EVALUATE", "meta", "warn", "awaiting_approval",
+                        "Paused for plan approval. Awaiting operator resume.")
+        await self.db.runs.update_one({"id": run_id}, {"$set": {"status": "paused"}})
+        try:
+            await asyncio.wait_for(_resume_events[run_id].wait(), timeout=300)
+            await self.emit(run_id, "EVALUATE", "meta", "success", "resumed",
+                            "Plan approved by operator. Resuming pipeline.")
+        except asyncio.TimeoutError:
+            await self.emit(run_id, "EVALUATE", "meta", "info", "resumed",
+                            "Approval timeout reached, auto-proceeding.")
+        await self.set_stage(run_id, "EVALUATE", "done")
+        await self.db.runs.update_one({"id": run_id}, {"$set": {"status": "running"}})
 
     # ---- GENERATE ----
     async def _stage_generate(self, run_id, config, surface, flows, model):
