@@ -13,6 +13,7 @@ export function deriveState(events) {
   const specsMap = {};
   const execMap = {};
   const healer = [];
+  const handoffs = [];
   let report = null;
   let awaiting = false;
   let complete = false;
@@ -72,6 +73,18 @@ export function deriveState(events) {
         report = { ...report, summary: { ...report.summary, ...summary_patch },
                   defects: defects !== undefined ? defects : report.defects };
       }
+    } else if (t === "handoff" && e.data) {
+      handoffs.push({
+        id: e.id,
+        seq: e.seq,
+        from: e.data.from,
+        to: e.data.to,
+        artifact: e.data.artifact,
+        summary: e.data.summary,
+        message: e.message,
+        stage: e.stage,
+        ts: e.ts,
+      });
     } else if (t === "report" && e.data?.report) {
       report = e.data.report;
     } else if (t === "run_complete") {
@@ -89,6 +102,8 @@ export function deriveState(events) {
     specs: Object.values(specsMap),
     executions: Object.values(execMap),
     healer, report, awaiting, complete,
+    handoffs,
+    replan: handoffs.some((h) => h.artifact === "feedback"),
     needsReview: healer.filter((a) => a.decision === "review"),
   };
 }

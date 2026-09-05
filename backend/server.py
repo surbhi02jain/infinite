@@ -32,6 +32,9 @@ db = client[os.environ['DB_NAME']]
 app = FastAPI(title="QAlchemist")
 api_router = APIRouter(prefix="/api")
 orch = Orchestrator(db)
+_run_tasks: Dict[str, asyncio.Task] = {}
+
+RUN_PUBLIC = {"_id": 0, "surface": 0, "config_secrets": 0}
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -65,6 +68,16 @@ async def root():
     return {"message": "QAlchemist orchestration API", "stages": STAGES}
 
 
+def _launch_run(run_id: str, config: dict):
+    task = asyncio.create_task(orch.run(run_id, config))
+    _run_tasks[run_id] = task
+
+    def _clear(t, rid=run_id):
+        _run_tasks.pop(rid, None)
+    task.add_done_callback(_clear)
+    return task
+
+
 @api_router.post("/runs")
 async def create_run(cfg: RunConfig):
     if not cfg.url or not cfg.url.startswith("http"):
@@ -73,6 +86,10 @@ async def create_run(cfg: RunConfig):
     auth_mode = "authenticated" if (cfg.username and cfg.password) else "public"
     config = cfg.model_dump()
     config["auth_mode"] = auth_mode
+    # Sauce Demo and similar apps put the login form on the target URL. If creds
+    # are present but Login URL was left blank, try the target page itself.
+    if auth_mode == "authenticated" and not config.get("login_url"):
+        config["login_url"] = cfg.url
     safe_config = {**config, "password": "***" if cfg.password else None}
     run_doc = {
         "id": run_id, "url": cfg.url, "status": "queued", "auth_mode": auth_mode,
@@ -80,21 +97,24 @@ async def create_run(cfg: RunConfig):
         "current_stage": "EXPLORE",
         "stages": {s: "pending" for s in STAGES},
     }
+    if cfg.password:
+        run_doc["config_secrets"] = {"password": cfg.password}
     await db.runs.insert_one(dict(run_doc))
-    asyncio.create_task(orch.run(run_id, config))
+    _launch_run(run_id, config)
     run_doc.pop("_id", None)
+    run_doc.pop("config_secrets", None)
     return run_doc
 
 
 @api_router.get("/runs")
 async def list_runs():
-    runs = await db.runs.find({}, {"_id": 0, "surface": 0}).sort("created_at", -1).to_list(100)
+    runs = await db.runs.find({}, RUN_PUBLIC).sort("created_at", -1).to_list(100)
     return runs
 
 
 @api_router.get("/runs/{run_id}")
 async def get_run(run_id: str):
-    run = await db.runs.find_one({"id": run_id}, {"_id": 0, "surface": 0})
+    run = await db.runs.find_one({"id": run_id}, RUN_PUBLIC)
     if not run:
         raise HTTPException(404, "Run not found")
     events = await db.events.find({"run_id": run_id}, {"_id": 0}).sort("seq", 1).to_list(5000)
@@ -106,8 +126,49 @@ async def get_run(run_id: str):
 async def get_events(run_id: str, after_seq: int = 0):
     events = await db.events.find({"run_id": run_id, "seq": {"$gt": after_seq}},
                                   {"_id": 0}).sort("seq", 1).to_list(5000)
-    run = await db.runs.find_one({"id": run_id}, {"_id": 0, "surface": 0})
+    run = await db.runs.find_one({"id": run_id}, RUN_PUBLIC)
     return {"events": events, "status": run.get("status") if run else "unknown"}
+
+
+@api_router.post("/runs/{run_id}/abort")
+async def abort_run(run_id: str):
+    run = await db.runs.find_one({"id": run_id}, RUN_PUBLIC)
+    if not run:
+        raise HTTPException(404, "Run not found")
+    if run.get("status") not in ("queued", "running", "paused"):
+        raise HTTPException(400, "Only queued, running, or paused runs can be aborted.")
+    task = _run_tasks.get(run_id)
+    if task and not task.done():
+        task.cancel()
+        ev = _resume_events.get(run_id)
+        if ev:
+            ev.set()
+    else:
+        # process restart lost the in-memory task — mark terminal so the UI can recover
+        await db.runs.update_one({"id": run_id}, {"$set": {
+            "status": "aborted", "error": "aborted by operator", "finished_at": now_iso()}})
+    return {"aborted": True}
+
+
+@api_router.post("/runs/{run_id}/rerun")
+async def rerun_run(run_id: str):
+    """Clone a finished run's configuration into a new run (completed, failed, or aborted)."""
+    source = await db.runs.find_one({"id": run_id}, {"_id": 0, "surface": 0})
+    if not source:
+        raise HTTPException(404, "Run not found")
+    if source.get("status") in ("queued", "running", "paused"):
+        raise HTTPException(400, "Abort or wait for the current run before rerunning.")
+    cfg = dict(source.get("config") or {})
+    secrets = source.get("config_secrets") or {}
+    password = secrets.get("password")
+    if cfg.get("password") == "***":
+        cfg["password"] = password
+    cfg.pop("auth_mode", None)
+    try:
+        parsed = RunConfig(**{k: v for k, v in ((k, cfg.get(k)) for k in RunConfig.model_fields) if v is not None})
+    except Exception as e:
+        raise HTTPException(400, f"Stored config cannot be rerun: {e}")
+    return await create_run(parsed)
 
 
 @api_router.post("/runs/{run_id}/resume")
@@ -195,7 +256,7 @@ async def stream_run(run_id: str, after_seq: int = 0):
             last_seq = e["seq"]
             yield f"data: {json.dumps(e)}\n\n"
         run = await db.runs.find_one({"id": run_id}, {"_id": 0})
-        if run and run.get("status") in ("completed", "failed"):
+        if run and run.get("status") in ("completed", "failed", "aborted"):
             yield "event: end\ndata: {}\n\n"
             return
         q = bus.subscribe(run_id)
@@ -232,7 +293,7 @@ async def get_report(run_id: str):
 @api_router.get("/runs/{run_id}/export")
 async def export_report(run_id: str, request: Request, fmt: str = "json"):
     report = await db.reports.find_one({"run_id": run_id}, {"_id": 0})
-    run = await db.runs.find_one({"id": run_id}, {"_id": 0, "surface": 0})
+    run = await db.runs.find_one({"id": run_id}, RUN_PUBLIC)
     if not report:
         raise HTTPException(404, "Report not ready")
     if fmt == "html":

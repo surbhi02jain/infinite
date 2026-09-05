@@ -18,6 +18,37 @@ export const STAGE_META = {
   REPORT: { text: "text-emerald-400", border: "border-emerald-500/50", bg: "bg-emerald-500/10", dot: "bg-emerald-400", ring: "shadow-[0_0_18px_rgba(16,185,129,0.4)]", agent: "Reporter" },
 };
 
+export const AGENT_DISPLAY = {
+  meta: "Meta-agent",
+  explorer: "Explorer",
+  planner: "Planner",
+  evaluator: "Evaluator",
+  generator: "Generator",
+  runner: "Runner",
+  healer: "Healer",
+  reporter: "Reporter",
+  operator: "Operator",
+};
+
+export const HANDOFF_TAB = {
+  planner: "plan",
+  evaluator: "eval",
+  generator: "code",
+  runner: "exec",
+  healer: "heal",
+  reporter: "report",
+  operator: "report",
+};
+
+export const EDGE_HANDOFF = {
+  EXPLORE: { from: "explorer", to: "planner", artifact: "surface" },
+  PLAN: { from: "planner", to: "evaluator", artifact: "flows" },
+  EVALUATE: { from: "evaluator", to: "generator", artifact: "evaluation" },
+  GENERATE: { from: "generator", to: "runner", artifact: "specs" },
+  RUN: { from: "runner", to: "healer", artifact: "executions" },
+  HEAL: { from: "healer", to: "reporter", artifact: "healer_actions" },
+};
+
 export function streamRun(runId, getAfterSeq, onEvent, onEnd) {
   let closed = false;
   let es = null;

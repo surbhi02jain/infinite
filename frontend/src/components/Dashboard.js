@@ -6,6 +6,7 @@ import { deriveState } from "@/lib/derive";
 import RunForm from "@/components/RunForm";
 import RunsSidebar from "@/components/RunsSidebar";
 import PipelineDAG from "@/components/PipelineDAG";
+import HandoffFeed from "@/components/HandoffFeed";
 import EventConsole from "@/components/EventConsole";
 import WorkspaceTabs from "@/components/WorkspaceTabs";
 import ReviewCallout from "@/components/ReviewCallout";
@@ -64,7 +65,7 @@ export default function Dashboard() {
       try {
         const { data } = await api.get(`/runs/${runId}/events?after_seq=${seqRef.current}`);
         (data.events || []).forEach(pushEvent);
-        if (["completed", "failed"].includes(data.status)) finishLive(runId);
+        if (["completed", "failed", "aborted"].includes(data.status)) finishLive(runId);
       } catch (_) {}
     }, 5000);
   }, [pushEvent, finishLive]);
@@ -108,6 +109,26 @@ export default function Dashboard() {
     }
   };
 
+  const abort = async () => {
+    try {
+      await api.post(`/runs/${activeRunId}/abort`);
+      toast.success("Abort requested", { description: "The pipeline will stop after the current step unwinds." });
+    } catch (e) {
+      toast.error("Could not abort", { description: e.response?.data?.detail || e.message });
+    }
+  };
+
+  const rerun = async (runId = activeRunId) => {
+    try {
+      const { data } = await api.post(`/runs/${runId}/rerun`);
+      toast.success("Rerun launched", { description: `Same config as before · ${data.url}` });
+      await loadRuns();
+      openRun(data.id);
+    } catch (e) {
+      toast.error("Could not rerun", { description: e.response?.data?.detail || e.message });
+    }
+  };
+
   useEffect(() => () => cleanup(), [cleanup]);
 
   const newRun = () => { cleanup(); setShowForm(true); setActiveRunId(null); activeRef.current = null; setRun(null); setEvents([]); setLive(false); };
@@ -144,6 +165,8 @@ export default function Dashboard() {
               <><Activity className="w-3.5 h-3.5 text-emerald-400" /><span className="text-emerald-400">COMPLETED</span></>
             ) : run?.status === "failed" ? (
               <><Activity className="w-3.5 h-3.5 text-rose-400" /><span className="text-rose-400">FAILED</span></>
+            ) : run?.status === "aborted" ? (
+              <><Activity className="w-3.5 h-3.5 text-amber-400" /><span className="text-amber-400">ABORTED</span></>
             ) : (
               <><Activity className="w-3.5 h-3.5 text-slate-500" /><span className="text-slate-500">IDLE</span></>
             )}
@@ -156,7 +179,7 @@ export default function Dashboard() {
       </header>
 
       <div className="flex-1 flex overflow-hidden">
-        <RunsSidebar runs={runs} activeRunId={activeRunId} onSelect={openRun} />
+        <RunsSidebar runs={runs} activeRunId={activeRunId} onSelect={openRun} onRerun={rerun} />
 
         <main className="flex-1 flex flex-col overflow-hidden bg-[#07090e]">
           {showForm ? (
@@ -165,7 +188,10 @@ export default function Dashboard() {
             <>
               <PipelineDAG stageStatus={derived.stageStatus} stageDuration={derived.stageDuration}
                 run={run} awaiting={derived.awaiting} onResume={resume}
-                activeTab={activeTab} onStageClick={setActiveTab} />
+                onAbort={abort} onRerun={() => rerun(activeRunId)}
+                activeTab={activeTab} onStageClick={setActiveTab}
+                handoffs={derived.handoffs} replan={derived.replan} />
+              <HandoffFeed handoffs={derived.handoffs} live={live} onSelect={setActiveTab} />
               <ReviewCallout items={derived.needsReview} onJump={() => setActiveTab("heal")} />
               <div className="flex-1 flex overflow-hidden">
                 <div className="flex-1 overflow-hidden flex flex-col border-r border-slate-800/80">

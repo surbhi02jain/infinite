@@ -101,9 +101,10 @@ async def explore_target_pw(run_id: str, url: str, login_url: str = None,
         context = await browser.new_context(viewport={"width": 1280, "height": 900},
                                              user_agent="QAlchemist-Explorer/2.0 (+Playwright)")
 
-        if login_url and username and password:
-            ok, err = await _attempt_login(context, login_url, username, password)
-            surface["auth"] = {"ok": ok, "login_url": login_url, "error": err}
+        effective_login_url = login_url or (url if username and password else None)
+        if effective_login_url and username and password:
+            ok, err = await _attempt_login(context, effective_login_url, username, password)
+            surface["auth"] = {"ok": ok, "login_url": effective_login_url, "error": err}
             if ok:
                 state_path = _run_dir(run_id) / "storageState.json"
                 await context.storage_state(path=str(state_path))

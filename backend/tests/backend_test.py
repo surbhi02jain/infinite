@@ -83,7 +83,7 @@ def test_event_types_persisted(completed_run):
     types = {e["type"] for e in events}
     # structurally guaranteed on every run regardless of what the real pipeline finds
     for t in ["run_start", "stage_start", "stage_complete", "plan_flow", "spec",
-              "selector_check", "exec_result", "report", "run_complete"]:
+              "selector_check", "exec_result", "report", "run_complete", "handoff"]:
         assert t in types, f"missing event type {t}"
     # "gap" (EVALUATE found a coverage gap) and "healer_action" (RUN produced a real failure to
     # triage) are data-dependent on the real audit/execution outcome — a thorough plan against a
@@ -96,6 +96,48 @@ def test_event_types_persisted(completed_run):
     seqs = [e["seq"] for e in events]
     assert seqs == sorted(seqs)
     assert all("_id" not in e for e in events)
+
+
+HAPPY_PATH_HANDOFFS = [
+    ("explorer", "planner", "surface"),
+    ("planner", "evaluator", "flows"),
+    ("evaluator", "generator", "evaluation"),
+    ("generator", "runner", "specs"),
+    ("runner", "healer", "executions"),
+    ("healer", "reporter", "healer_actions"),
+    ("reporter", "operator", "report"),
+]
+
+
+def test_happy_path_handoffs(completed_run):
+    handoffs = [e for e in completed_run["events"] if e["type"] == "handoff"]
+    pairs = [(e["data"]["from"], e["data"]["to"], e["data"]["artifact"]) for e in handoffs]
+    i = 0
+    for item in pairs:
+        if i < len(HAPPY_PATH_HANDOFFS) and item == HAPPY_PATH_HANDOFFS[i]:
+            i += 1
+    assert i == len(HAPPY_PATH_HANDOFFS), f"happy-path handoffs not a subsequence: {pairs}"
+    for e in handoffs:
+        assert e["data"].get("from")
+        assert e["data"].get("to")
+        assert e["data"].get("artifact")
+        assert e["data"].get("summary")
+        assert "→" in e["message"]
+
+
+def test_replan_handoff_when_present(completed_run):
+    handoffs = [e for e in completed_run["events"] if e["type"] == "handoff"]
+    feedback = [e for e in handoffs if e["data"].get("artifact") == "feedback"]
+    if not feedback:
+        return
+    fb = feedback[0]
+    assert fb["data"]["from"] == "evaluator"
+    assert fb["data"]["to"] == "planner"
+    later = [e for e in handoffs if e["seq"] > fb["seq"]
+             and e["data"].get("from") == "planner"
+             and e["data"].get("to") == "evaluator"
+             and e["data"].get("artifact") == "flows"]
+    assert later, "re-plan feedback must be followed by a Planner → Evaluator flows handoff"
 
 
 def test_report_summary(completed_run):
@@ -120,6 +162,15 @@ def test_password_masked(client):
     assert run["config"]["password"] == "***"
     g = client.get(f"{API}/runs/{run['id']}")
     assert "supersecret123" not in json.dumps(g.json())
+
+
+def test_login_url_defaults_to_target_when_creds_present(client):
+    r = client.post(f"{API}/runs", json={"url": "https://www.saucedemo.com/",
+                                         "username": "standard_user", "password": "secret_sauce"})
+    assert r.status_code == 200
+    run = r.json()
+    assert run["auth_mode"] == "authenticated"
+    assert run["config"]["login_url"] == "https://www.saucedemo.com/"
 
 
 def test_list_runs(client, completed_run):
@@ -224,6 +275,62 @@ def test_pause_and_resume(client):
 def test_resume_not_awaiting(client):
     r = client.post(f"{API}/runs/unknown-run-id/resume")
     assert r.status_code == 400
+
+
+# ---------------- abort / rerun ----------------
+def test_abort_unknown_run(client):
+    r = client.post(f"{API}/runs/unknown-run-id/abort")
+    assert r.status_code == 404
+
+
+def test_rerun_unknown_run(client):
+    r = client.post(f"{API}/runs/unknown-run-id/rerun")
+    assert r.status_code == 404
+
+
+def test_abort_then_rerun_same_config(client):
+    r = client.post(f"{API}/runs", json={"url": "https://example.com", "budget": "quick",
+                                         "intent": "focus on homepage"})
+    assert r.status_code == 200
+    run_id = r.json()["id"]
+    ab = client.post(f"{API}/runs/{run_id}/abort")
+    assert ab.status_code == 200, ab.text
+    assert ab.json()["aborted"] is True
+
+    deadline = time.time() + 60
+    status = None
+    while time.time() < deadline:
+        status = client.get(f"{API}/runs/{run_id}").json()["run"]["status"]
+        if status in ("aborted", "failed", "completed"):
+            break
+        time.sleep(1)
+    assert status == "aborted", status
+
+    again = client.post(f"{API}/runs/{run_id}/rerun")
+    assert again.status_code == 200, again.text
+    clone = again.json()
+    assert clone["id"] != run_id
+    assert clone["url"] == "https://example.com"
+    assert clone["config"]["budget"] == "quick"
+    assert clone["config"]["intent"] == "focus on homepage"
+    assert clone["status"] in ("queued", "running")
+    # don't leave the clone burning LLM/browser budget
+    client.post(f"{API}/runs/{clone['id']}/abort")
+
+
+def test_abort_terminal_run_rejected(completed_run, client):
+    r = client.post(f"{API}/runs/{completed_run['run']['id']}/abort")
+    assert r.status_code == 400
+
+
+def test_rerun_completed_run(completed_run, client):
+    old = completed_run["run"]
+    r = client.post(f"{API}/runs/{old['id']}/rerun")
+    assert r.status_code == 200, r.text
+    clone = r.json()
+    assert clone["id"] != old["id"]
+    assert clone["url"] == old["url"]
+    client.post(f"{API}/runs/{clone['id']}/abort")
 
 # ---------------- iteration 2: fixes re-test ----------------
 def test_events_endpoint_after_seq(client, completed_run):

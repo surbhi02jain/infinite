@@ -19,6 +19,22 @@ DEFAULT_MODEL = "sarvam-105b"
 
 STAGES = ["EXPLORE", "PLAN", "EVALUATE", "GENERATE", "RUN", "HEAL", "REPORT"]
 
+AGENT_DISPLAY = {
+    "meta": "Meta-agent",
+    "explorer": "Explorer",
+    "planner": "Planner",
+    "evaluator": "Evaluator",
+    "generator": "Generator",
+    "runner": "Runner",
+    "healer": "Healer",
+    "reporter": "Reporter",
+    "operator": "Operator",
+}
+
+
+def handoff_message(frm: str, to: str, summary: str) -> str:
+    return f"{AGENT_DISPLAY.get(frm, frm)} → {AGENT_DISPLAY.get(to, to)}: {summary}"
+
 # in-memory control primitives per run
 defaultdict_seq = {}
 _resume_events = {}
@@ -147,6 +163,13 @@ class Orchestrator:
             upd.update(extra)
         await self.db.runs.update_one({"id": run_id}, {"$set": upd})
 
+    async def _handoff(self, run_id, stage, frm, to, artifact, summary, level="info"):
+        return await self.emit(
+            run_id, stage, frm, level, "handoff",
+            handoff_message(frm, to, summary),
+            {"from": frm, "to": to, "artifact": artifact, "summary": summary},
+        )
+
     async def run(self, run_id: str, config: dict):
         _resume_events[run_id] = asyncio.Event()
         models = config.get("models", {})
@@ -169,11 +192,16 @@ class Orchestrator:
             # plan the evaluator itself flagged as incomplete.
             high_gaps = [g for g in evaluation.get("coverage_gaps", []) if str(g.get("severity", "")).lower() == "high"]
             if high_gaps or evaluation.get("prd_gaps"):
+                n_prd = len(evaluation.get("prd_gaps") or [])
                 await self.emit(run_id, "EVALUATE", "meta", "warn", "decision",
                                 f"Meta-agent decision: {len(high_gaps)} high-severity coverage gap(s) and "
-                                f"{len(evaluation.get('prd_gaps', []))} PRD gap(s) found — escalating back to the "
+                                f"{n_prd} PRD gap(s) found — escalating back to the "
                                 "Planner with this feedback before generation, instead of proceeding on an "
                                 "incomplete plan.")
+                await self._handoff(
+                    run_id, "EVALUATE", "evaluator", "planner", "feedback",
+                    f"{len(high_gaps)} high-severity coverage gap(s), {n_prd} PRD gap(s)",
+                    level="warn")
                 plan = await self._stage_plan(run_id, config, surface, m("planner"), feedback=evaluation)
                 plan, evaluation = await self._stage_evaluate(run_id, config, surface, plan, m("evaluator"), second_pass=True)
 
@@ -193,6 +221,13 @@ class Orchestrator:
                 await self.set_stage(run_id, "EVALUATE", "done")
                 await self.db.runs.update_one({"id": run_id}, {"$set": {"status": "running"}})
 
+            n_gaps = len(evaluation.get("coverage_gaps") or [])
+            n_added = len(evaluation.get("added_flows") or [])
+            eval_fb = " (fallback)" if evaluation.get("_fallback") else ""
+            await self._handoff(
+                run_id, "EVALUATE", "evaluator", "generator", "evaluation",
+                f"{n_gaps} gaps, {n_added} flows auto-added{eval_fb}")
+
             specs = await self._stage_generate(run_id, config, surface, plan, m("generator"))
             executions = await self._stage_run(run_id, config, surface, specs)
             healer = await self._stage_heal(run_id, config, surface, executions, specs, m("healer"))
@@ -201,6 +236,15 @@ class Orchestrator:
             await self.db.runs.update_one({"id": run_id}, {"$set": {"status": "completed", "finished_at": now_iso()}})
             await self.emit(run_id, "REPORT", "meta", "success", "run_complete",
                             "Autonomous run complete. Report generated.")
+        except asyncio.CancelledError:
+            await self.db.runs.update_one({"id": run_id}, {"$set": {
+                "status": "aborted", "error": "aborted by operator", "finished_at": now_iso()}})
+            try:
+                await self.emit(run_id, "REPORT", "meta", "warn", "run_complete",
+                                "Run aborted by operator.")
+            except Exception:
+                pass
+            raise
         except Exception as e:
             await self.db.runs.update_one({"id": run_id}, {"$set": {"status": "failed", "error": str(e)}})
             await self.emit(run_id, "REPORT", "meta", "error", "run_complete", f"Run failed: {e}")
@@ -237,6 +281,11 @@ class Orchestrator:
                                 f"Logged in at {auth.get('login_url')} and persisted real Playwright "
                                 "storageState.json (cookies/session) for reuse across all tests.",
                                 {"storage_state": surface.get("storage_state_path")})
+            elif not surface.get("auth"):
+                await self.emit(run_id, "EXPLORE", "explorer", "warn", "log",
+                                "Credentials were provided but login was skipped (no login URL). "
+                                "Set Login URL to the sign-in page, or leave username/password empty "
+                                "for public-flow mode.")
             else:
                 await self.emit(run_id, "EXPLORE", "explorer", "warn", "log",
                                 f"Login attempt at {auth.get('login_url')} failed "
@@ -246,6 +295,9 @@ class Orchestrator:
         await self.emit(run_id, "EXPLORE", "explorer", "success", "stage_complete",
                         f"Exploration complete: {len(surface['pages'])} pages, "
                         f"{len(surface['forms'])} forms discovered.", {"routes": surface["routes"]})
+        await self._handoff(
+            run_id, "EXPLORE", "explorer", "planner", "surface",
+            f"{len(surface['pages'])} pages, {len(surface['forms'])} forms")
         await self.set_stage(run_id, "EXPLORE", "done")
         return surface
 
@@ -270,8 +322,10 @@ class Orchestrator:
         prompt += "Produce the test plan JSON."
         data, _ = await self._safe_llm(system, prompt, model, run_id, "PLAN", "planner")
         flows = (data or {}).get("flows") if isinstance(data, dict) else data
+        used_fallback = False
         if not flows:
             flows = _fallback_flows(surface)
+            used_fallback = True
         for i, f in enumerate(flows):
             _normalize_flow(f)
             f.setdefault("flow_id", f"F{i+1}")
@@ -284,6 +338,10 @@ class Orchestrator:
                         f"({sum(1 for x in flows if x['type']=='happy')} happy, "
                         f"{sum(1 for x in flows if x['type']=='edge')} edge, "
                         f"{sum(1 for x in flows if x['type']=='error')} error).")
+        fb = " (fallback)" if used_fallback else ""
+        await self._handoff(
+            run_id, "PLAN", "planner", "evaluator", "flows",
+            f"{len(flows)} flows{fb}")
         await self.set_stage(run_id, "PLAN", "done")
         return flows
 
@@ -302,6 +360,7 @@ class Orchestrator:
                   f"PRD:\n{config.get('prd') or 'none'}\n\nAudit now.")
         data, _ = await self._safe_llm(system, prompt, model, run_id, "EVALUATE", "evaluator")
         data = data if isinstance(data, dict) and data else None
+        used_fallback = data is None
         if data is None:
             data = _fallback_evaluation(surface, flows, config.get("prd"))
             await self.emit(run_id, "EVALUATE", "evaluator", "info", "log",
@@ -337,10 +396,13 @@ class Orchestrator:
             flows = flows[:cap]
         for idx, f in enumerate(flows):
             f["flow_id"] = f"F{idx+1}"
-        await self.db.plans.update_one({"run_id": run_id}, {"$set": {"flows": flows, "evaluation": data}})
+        persist_eval = {k: v for k, v in data.items() if k != "_fallback"}
+        await self.db.plans.update_one({"run_id": run_id}, {"$set": {"flows": flows, "evaluation": persist_eval}})
         await self.emit(run_id, "EVALUATE", "evaluator", "success", "stage_complete",
                         f"Audit complete: {len(data.get('coverage_gaps', []))} gaps, "
-                        f"{len(added)} flows auto-added. Coverage hardened.", {"evaluation": data})
+                        f"{len(added)} flows auto-added. Coverage hardened.", {"evaluation": persist_eval})
+        if used_fallback:
+            data["_fallback"] = True
         await self.set_stage(run_id, "EVALUATE", "done")
         return flows, data
 
@@ -351,6 +413,7 @@ class Orchestrator:
                         f"Generator ({model}) writing Playwright specs with live selector validation...")
         known_selectors = _known_selectors(surface)
         specs = []
+        used_fallback = False
         for f in flows:
             system = ("You are a Playwright test generator. Write ONE complete Playwright test spec (JavaScript, "
                       "@playwright/test) for the given flow. Use realistic locators, auto-waiting, and assertions. "
@@ -362,7 +425,11 @@ class Orchestrator:
                       "Generate the spec.")
             data, _ = await self._safe_llm(system, prompt, model, run_id, "GENERATE", "generator")
             data = data if isinstance(data, dict) else {}
-            code = data.get("code") or _fallback_spec(f, config["url"])
+            if data.get("code"):
+                code = data["code"]
+            else:
+                code = _fallback_spec(f, config["url"])
+                used_fallback = True
             filename = data.get("filename") or f"{_slug(f['name'])}.spec.js"
             # the LLM (in PLAN or here) occasionally returns "selectors" as a plain string instead
             # of a JSON array despite the schema asking for one — iterating a string in Python walks
@@ -399,6 +466,10 @@ class Orchestrator:
             await asyncio.sleep(0.15)
         await self.emit(run_id, "GENERATE", "generator", "success", "stage_complete",
                         f"Generated {len(specs)} executable Playwright specs.")
+        fb = " (fallback)" if used_fallback else ""
+        await self._handoff(
+            run_id, "GENERATE", "generator", "runner", "specs",
+            f"{len(specs)} specs{fb}")
         await self.set_stage(run_id, "GENERATE", "done")
         return specs
 
@@ -471,8 +542,12 @@ class Orchestrator:
                                             on_step=on_step, on_result=on_result)
 
         passed = sum(1 for e in executions if e["status"] == "passed")
+        failed = len(executions) - passed
         await self.emit(run_id, "RUN", "runner", "info", "stage_complete",
-                        f"Execution complete: {passed}/{len(executions)} passed, {len(executions)-passed} failed.")
+                        f"Execution complete: {passed}/{len(executions)} passed, {failed} failed.")
+        await self._handoff(
+            run_id, "RUN", "runner", "healer", "executions",
+            f"{len(executions)} executions, {passed} passed, {failed} failed")
         await self.set_stage(run_id, "RUN", "done")
         return executions
 
@@ -624,6 +699,9 @@ class Orchestrator:
                         f"Healer done: {sum(1 for a in actions if a['decision']=='script')} healed, "
                         f"{sum(1 for a in actions if a['decision']=='defect')} defects, "
                         f"{sum(1 for a in actions if a['decision']=='review')} need review.")
+        await self._handoff(
+            run_id, "HEAL", "healer", "reporter", "healer_actions",
+            f"{len(actions)} actions")
         await self.set_stage(run_id, "HEAL", "done")
         return actions
 
@@ -688,6 +766,9 @@ class Orchestrator:
         await self.emit(run_id, "REPORT", "reporter", "success", "report",
                         f"Report ready: {pass_rate}% pass, {len(defects)} defects, risk index {risk_index}.",
                         {"report": report})
+        await self._handoff(
+            run_id, "REPORT", "reporter", "operator", "report",
+            f"{pass_rate}% pass, {len(defects)} defects")
         await self.emit(run_id, "REPORT", "reporter", "success", "stage_complete",
                         "Final test-quality report aggregated and persisted.")
         await self.set_stage(run_id, "REPORT", "done")

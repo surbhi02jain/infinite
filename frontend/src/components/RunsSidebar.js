@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { formatDistanceToNow } from "date-fns";
-import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { PanelLeftClose, PanelLeftOpen, RotateCcw } from "lucide-react";
 import TipIconButton from "@/components/TipIconButton";
 
 const STATUS_STYLE = {
@@ -9,9 +9,12 @@ const STATUS_STYLE = {
   queued: "text-slate-400 bg-slate-900 border-slate-800",
   paused: "text-amber-300 bg-amber-950/60 border-amber-500/30",
   failed: "text-rose-400 bg-rose-950/60 border-rose-500/30",
+  aborted: "text-amber-300 bg-amber-950/60 border-amber-500/30",
 };
 
-export default function RunsSidebar({ runs, activeRunId, onSelect }) {
+const TERMINAL = ["completed", "failed", "aborted"];
+
+export default function RunsSidebar({ runs, activeRunId, onSelect, onRerun }) {
   // narrow/tablet screens can't fit both side panels + the workspace at once — start collapsed
   // there so the main content is usable; desktop keeps its normal default (open).
   const [collapsed, setCollapsed] = useState(() => typeof window !== "undefined" && window.innerWidth < 1024);
@@ -49,27 +52,38 @@ export default function RunsSidebar({ runs, activeRunId, onSelect }) {
           const s = r.report_summary;
           const active = r.id === activeRunId;
           return (
-            <button key={r.id} data-testid="run-history-item" onClick={() => onSelect(r.id)}
-              className={`w-full text-left p-3 rounded-xl border transition-colors duration-200 ${
+            <div key={r.id}
+              className={`rounded-xl border transition-colors duration-200 ${
                 active ? "border-emerald-500/50 bg-[#0f1a26]" : "border-slate-800 bg-[#0b111c] hover:border-slate-700"}`}>
-              <div className="flex items-center justify-between gap-2 mb-1.5">
-                <div className="font-mono text-[11px] text-slate-300 truncate flex-1">{prettyUrl(r.url)}</div>
-                <span className={`shrink-0 px-1.5 py-0.5 rounded border text-[9px] font-mono uppercase ${STATUS_STYLE[r.status] || STATUS_STYLE.queued}`}>{r.status}</span>
-              </div>
-              <div className="flex items-center gap-3 text-[10px] text-slate-500 font-mono">
-                <span>{r.created_at ? formatDistanceToNow(new Date(r.created_at), { addSuffix: true }) : ""}</span>
-                {r.auth_mode === "authenticated" && <span className="text-amber-400">auth</span>}
-              </div>
-              {s && (
-                <div className="flex items-center gap-2 mt-2 text-[10px] font-mono">
-                  <span className="text-emerald-400">{s.pass_rate}%</span>
-                  <span className="text-slate-600">·</span>
-                  <span className="text-slate-400">{s.passed}✓</span>
-                  {s.healed > 0 && <span className="text-amber-400">{s.healed}⟳</span>}
-                  {s.defects > 0 && <span className="text-rose-400">{s.defects}⚠</span>}
+              <button data-testid="run-history-item" type="button" onClick={() => onSelect(r.id)}
+                className="w-full text-left p-3">
+                <div className="flex items-center justify-between gap-2 mb-1.5">
+                  <div className="font-mono text-[11px] text-slate-300 truncate flex-1">{prettyUrl(r.url)}</div>
+                  <span className={`shrink-0 px-1.5 py-0.5 rounded border text-[9px] font-mono uppercase ${STATUS_STYLE[r.status] || STATUS_STYLE.queued}`}>{r.status}</span>
+                </div>
+                <div className="flex items-center gap-3 text-[10px] text-slate-500 font-mono">
+                  <span>{r.created_at ? formatDistanceToNow(new Date(r.created_at), { addSuffix: true }) : ""}</span>
+                  {r.auth_mode === "authenticated" && <span className="text-amber-400">auth</span>}
+                </div>
+                {s && (
+                  <div className="flex items-center gap-2 mt-2 text-[10px] font-mono">
+                    <span className="text-emerald-400">{s.pass_rate}%</span>
+                    <span className="text-slate-600">·</span>
+                    <span className="text-slate-400">{s.passed}✓</span>
+                    {s.healed > 0 && <span className="text-amber-400">{s.healed}⟳</span>}
+                    {s.defects > 0 && <span className="text-rose-400">{s.defects}⚠</span>}
+                  </div>
+                )}
+              </button>
+              {TERMINAL.includes(r.status) && (
+                <div className="px-3 pb-2 flex justify-end -mt-1">
+                  <TipIconButton data-testid={`rerun-history-${r.id}`} label="Rerun with the same configuration"
+                    onClick={() => onRerun?.(r.id)} className="text-slate-500 hover:text-emerald-400 h-6 w-6">
+                    <RotateCcw className="w-3 h-3" />
+                  </TipIconButton>
                 </div>
               )}
-            </button>
+            </div>
           );
         })}
       </div>
