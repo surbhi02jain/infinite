@@ -186,12 +186,27 @@ _STOPWORDS = re.compile(
 
 
 def _keywords(step_text: str) -> str:
+    # a quoted literal is the actual target name when present ("Click a product such as 'Backpack'
+    # on the inventory page" -> "Backpack") — without this, the generic word-strip below keeps
+    # whatever's left after removing a couple of leading stopwords, which for a step phrased with
+    # its real subject later in the sentence is a long, unmatchable verbose fragment rather than the
+    # product/button name itself. Drop any parenthetical aside first, same reasoning as the spec
+    # generator's _spec_keywords: an example like "(e.g., 'Sauce Labs Backpack')" isn't the target.
+    stripped = re.sub(r"\([^)]*\)", "", step_text)
+    m = _QUOTED_RE.search(stripped)
+    if m:
+        lit = m.group(1) if m.group(1) is not None else m.group(2)
+        if lit and lit.strip():
+            return lit.strip()
     t = re.sub(r"\b(button|link|icon|option|tab|element|page|field)\b", "", step_text, flags=re.I)
     prev = None
     while prev != t:
         prev = t
         t = _STOPWORDS.sub("", t.strip())
-    t = t.strip().strip("'\"")  # LLM-authored steps often quote the target, e.g. "Click the 'Login' button"
+    # LLM-authored steps sometimes hyphenate an id-shaped name ("Click login-button") — removing the
+    # word "button" above leaves a trailing "-" ("login-"), which then fails to match a real element
+    # whose accessible name is plain "Login" with no hyphen at all.
+    t = t.strip().strip("'\" -_.:;,")
     return t or step_text.strip()
 
 
@@ -223,35 +238,46 @@ async def _find_clickable(page, step_text, spec_selectors, timeout_ms=3000):
 _QUOTED_RE = re.compile(r"'([^']*)'|\"([^\"]*)\"")
 
 
-async def _fill_targeted(page, step_text):
-    """Fills the ONE field a step clearly names (e.g. "Enter 'tomsmith' in the username field"),
-    honoring any literal quoted value — falling back to type-based dummy data only when the step
-    gives no explicit value. Returns True if it found and filled a specific field, else False so the
-    caller can fall back to the generic multi-input fill."""
+async def _fill_targeted(page, step_text, username=None, password=None):
+    """Fills the ONE field a step clearly names (e.g. "Enter 'tomsmith' in the username field").
+    Priority for the value: a literal quoted in the step text, then the run's own real credentials
+    (if the operator provided them and this is a credential field), then type-based dummy data as a
+    last resort. Without the credentials fallback, a plan that describes the field without quoting a
+    literal (the LLM doesn't always do so, even when real creds were given) would silently type dummy
+    placeholder text into a real login form and misattribute the resulting failure to the app under
+    test. Returns (selector, value_filled) on success, else None so the caller can fall back to the
+    generic multi-input fill."""
     t = step_text.lower()
     m = _QUOTED_RE.search(step_text)
     value = (m.group(1) if m and m.group(1) is not None else (m.group(2) if m else None))
 
     if "password" in t:
         selector, kind = 'input[type="password"]', "password"
+        value = value or password
     elif "email" in t:
         selector, kind = 'input[type="email"]', "email"
     elif "username" in t or "user name" in t or "login" in t:
         selector, kind = 'input[type="text"], input[type="email"], input[name*="user" i]', "text"
+        value = value or username
     else:
-        return False
+        return None
 
     loc = page.locator(selector).first
     try:
         await loc.wait_for(state="visible", timeout=3000)
     except Exception:
-        return False
+        return None
     fill_value = value if value else DUMMY_VALUES.get(kind, DUMMY_VALUES["text"]).format(n=int(time.time()) % 10000)
     await loc.fill(fill_value, timeout=3000)
-    return True
+    return selector, fill_value
 
 
 async def _fill_visible_inputs(page, n_seed):
+    """Fills visible EMPTY inputs only. Without the emptiness check, a later generic "fill in the
+    remaining fields" step would blindly overwrite a field an earlier _fill_targeted call already
+    filled correctly (e.g. a real username) with dummy placeholder text — silently corrupting the
+    flow's real input and, downstream, misattributing the resulting failure to the app under test
+    instead of to this step. Only ever fill what's actually still blank."""
     filled = []
     for kind, selector in [("password", 'input[type="password"]'), ("email", 'input[type="email"]'),
                             ("number", 'input[type="number"]'), ("text", 'input[type="text"], textarea'),
@@ -262,6 +288,12 @@ async def _fill_visible_inputs(page, n_seed):
             for i in range(count):
                 el = loc.nth(i)
                 if not await el.is_visible():
+                    continue
+                try:
+                    existing = await el.input_value(timeout=1000)
+                except Exception:
+                    existing = ""
+                if existing.strip():
                     continue
                 val = DUMMY_VALUES.get(kind, DUMMY_VALUES["text"]).format(n=n_seed)
                 await el.fill(val, timeout=3000)
@@ -274,7 +306,7 @@ async def _fill_visible_inputs(page, n_seed):
 _URL_IN_STEP_RE = re.compile(r"https?://\S+")
 
 
-async def _execute_step(page, step_text, spec_selectors, base_url, prev_url):
+async def _execute_step(page, step_text, spec_selectors, base_url, prev_url, username=None, password=None):
     t = step_text.lower()
     try:
         url_m = _URL_IN_STEP_RE.search(step_text)
@@ -295,25 +327,61 @@ async def _execute_step(page, step_text, spec_selectors, base_url, prev_url):
         if t.strip().startswith("assert") or "assert" in t or t.strip().startswith("verify"):
             return await _execute_assert(page, t, step_text, base_url, prev_url)
 
-        if any(k in t for k in ("fill", "enter", "type", "input")):
-            if await _fill_targeted(page, step_text):
-                return {"ok": True}
-            filled = await _fill_visible_inputs(page, int(time.time()) % 10000)
-            if not filled:
-                return {"ok": True, "note": "no empty inputs found to fill"}
-            return {"ok": True}
-
-        if any(k in t for k in ("submit", "proceed", "continue", "checkout", "confirm")):
-            loc, desc = await _find_clickable(page, step_text, spec_selectors)
+        # a step can describe the whole login action in one sentence ("Log in with standard_user
+        # credentials", "Enter valid credentials and log in") without using any fill/enter/click
+        # verb the other branches key off — left unhandled, it silently no-ops as "informational"
+        # and every later step then fails against a page the flow never actually logged into.
+        if any(k in t for k in ("log in", "login")) and not any(k in t for k in ("fill", "enter", "type", "input")):
+            filled_any = False
+            for sel, val in (('input[type="text"], input[type="email"], input[name*="user" i]',
+                               username or DUMMY_VALUES["text"]),
+                              ('input[type="password"]', password or DUMMY_VALUES["password"])):
+                try:
+                    loc = page.locator(sel).first
+                    await loc.wait_for(state="visible", timeout=2000)
+                    await loc.fill(val, timeout=3000)
+                    filled_any = True
+                except Exception:
+                    continue
+            loc, desc = await _find_clickable(page, "login submit button", spec_selectors)
             if loc is None:
-                await page.locator('button[type="submit"], input[type="submit"]').first.click(timeout=5000)
+                desc = 'button[type="submit"], input[type="submit"]'
+                try:
+                    await page.locator(desc).first.click(timeout=5000)
+                except Exception:
+                    if not filled_any:
+                        return {"ok": False, "fail_type": "selector-not-found",
+                                "error": f"No login form or submit control found for step: '{step_text}'"}
             else:
                 await loc.click(timeout=8000)
             try:
                 await page.wait_for_load_state("networkidle", timeout=6000)
             except PWTimeoutError:
                 pass
-            return {"ok": True}
+            return {"ok": True, "locator": desc, "note": "compound login step (filled credentials + submitted)"}
+
+        if any(k in t for k in ("fill", "enter", "type", "input")):
+            targeted = await _fill_targeted(page, step_text, username=username, password=password)
+            if targeted:
+                sel, val = targeted
+                return {"ok": True, "locator": sel, "note": f"filled '{val}'"}
+            filled = await _fill_visible_inputs(page, int(time.time()) % 10000)
+            if not filled:
+                return {"ok": True, "note": "no empty inputs found to fill"}
+            return {"ok": True, "locator": ", ".join(dict.fromkeys(filled))}
+
+        if any(k in t for k in ("submit", "proceed", "continue", "checkout", "confirm")):
+            loc, desc = await _find_clickable(page, step_text, spec_selectors)
+            if loc is None:
+                desc = 'button[type="submit"], input[type="submit"]'
+                await page.locator(desc).first.click(timeout=5000)
+            else:
+                await loc.click(timeout=8000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=6000)
+            except PWTimeoutError:
+                pass
+            return {"ok": True, "locator": desc}
 
         if any(k in t for k in ("click", "select", "choose", "tap", "press", "add")):
             loc, desc = await _find_clickable(page, step_text, spec_selectors)
@@ -328,7 +396,7 @@ async def _execute_step(page, step_text, spec_selectors, base_url, prev_url):
                 await page.wait_for_load_state("networkidle", timeout=4000)
             except PWTimeoutError:
                 pass
-            return {"ok": True}
+            return {"ok": True, "locator": desc}
 
         # unrecognized step type — treat as a soft no-op rather than a hard failure
         return {"ok": True, "note": "step not directly actionable; treated as informational"}
@@ -438,7 +506,8 @@ async def run_flow_pw(run_id, browser, storage_state_path, config, flow, spec, o
         result = {"ok": True}
         if not failed:
             result = await _execute_step(page, step_text, [s["selector"] for s in spec.get("selectors", [])],
-                                          config["url"], prev_url)
+                                          config["url"], prev_url,
+                                          username=config.get("username"), password=config.get("password"))
             prev_url = page.url
         shot_name = f"{slug}-step{i+1}.png"
         try:
@@ -450,7 +519,8 @@ async def run_flow_pw(run_id, browser, storage_state_path, config, flow, spec, o
         # instead of the whole flow blurring past in well under a second on a fast/simple page
         await page.wait_for_timeout(400)
         step_entry = {"index": i + 1, "description": step_text, "ok": result.get("ok", True),
-                      "note": result.get("error") or result.get("note"), "screenshot_url": shot_url}
+                      "note": result.get("error") or result.get("note"), "screenshot_url": shot_url,
+                      "locator": result.get("locator")}
         steps_log.append(step_entry)
         if on_step:
             await on_step(spec, step_entry, len(flow.get("steps") or []))
