@@ -44,6 +44,10 @@ export function deriveState(events) {
       prdGaps.push(e.message.replace("PRD gap: ", ""));
     } else if (t === "spec" && e.data?.spec) {
       specsMap[e.data.spec.flow_id] = e.data.spec;
+    } else if (t === "spec_healed" && e.data?.spec) {
+      // a verified heal patched this spec's code/selectors in place — replace, don't merge, so a
+      // spec's `selectors` list always reflects the healed state, not a stale+healed mashup.
+      specsMap[e.data.spec.flow_id] = e.data.spec;
     } else if (t === "exec_result" && e.data?.execution) {
       const ex = e.data.execution;
       execMap[ex.flow_id] = { ...(execMap[ex.flow_id] || {}), ...ex };
@@ -54,6 +58,10 @@ export function deriveState(events) {
         execMap[a.flow_id].final_status =
           a.decision === "script" ? "healed" : a.decision === "defect" ? "defect" : "review";
         execMap[a.flow_id].healer = a;
+        // a verified heal replaces the execution's screenshot with the passing replay's — keep the
+        // original failure screenshot too so the UI can show proof of both broken and fixed states.
+        if (a.artifacts) execMap[a.flow_id].artifacts = a.artifacts;
+        if (a.original_artifacts) execMap[a.flow_id].original_artifacts = a.original_artifacts;
       }
     } else if (t === "healer_action_resolved" && e.data) {
       const { action_id, flow_id, resolution, summary_patch, defects } = e.data;

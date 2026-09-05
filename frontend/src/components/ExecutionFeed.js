@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { CheckCircle2, XCircle, Wrench, HelpCircle, CircleSlash, Cpu, Film, FileArchive, ChevronRight, ExternalLink } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { CheckCircle2, XCircle, Wrench, HelpCircle, CircleSlash, Cpu, Film, FileArchive, ChevronRight, ExternalLink, ArrowRight, Terminal, WifiOff, ChevronDown } from "lucide-react";
 import { Empty, SectionHeader } from "@/components/TestPlanView";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { ARTIFACT_BASE } from "@/api";
@@ -13,8 +13,54 @@ const FINAL = {
   failed: { icon: XCircle, cls: "text-rose-400 border-rose-500/30 bg-rose-950/30", label: "FAILED" },
 };
 
-export default function ExecutionFeed({ executions }) {
+// Playwright's own hosted trace viewer can load a trace.zip straight from a URL — turns a "download
+// a zip nobody opens" link into a one-click, fully interactive replay of the exact failing run.
+function traceViewerUrl(traceUrl) {
+  return `https://trace.playwright.dev/?trace=${encodeURIComponent(traceUrl)}`;
+}
+
+function ConsoleNetworkEvidence({ execution: e }) {
+  const [open, setOpen] = useState(false);
+  const consoleErrors = e.console_errors || [];
+  const networkErrors = e.network || [];
+  if (!consoleErrors.length && !networkErrors.length) return null;
+  return (
+    <div className="mt-3">
+      <button type="button" onClick={() => setOpen((o) => !o)}
+        data-testid={`execution-evidence-toggle-${e.flow_id}`}
+        className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-slate-500 hover:text-slate-300">
+        <ChevronDown className={`w-3 h-3 transition-transform ${open ? "" : "-rotate-90"}`} />
+        Console & Network Evidence ({consoleErrors.length + networkErrors.length})
+      </button>
+      {open && (
+        <div className="mt-2 space-y-1.5">
+          {consoleErrors.map((c, i) => (
+            <div key={`c${i}`} className="flex items-start gap-1.5 font-mono text-[11px] text-rose-300 bg-[#07090e] border border-slate-800 rounded-lg p-2">
+              <Terminal className="w-3 h-3 mt-0.5 shrink-0 text-rose-500" /> <span className="break-all">{c}</span>
+            </div>
+          ))}
+          {networkErrors.map((n, i) => (
+            <div key={`n${i}`} className="flex items-start gap-1.5 font-mono text-[11px] text-amber-300 bg-[#07090e] border border-slate-800 rounded-lg p-2">
+              <WifiOff className="w-3 h-3 mt-0.5 shrink-0 text-amber-500" />
+              <span className="break-all">{n.status ? `${n.status} — ` : ""}{n.url || JSON.stringify(n)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function ExecutionFeed({ executions, highlightFlowId }) {
   const [lightbox, setLightbox] = useState(null);
+  const cardRefs = useRef({});
+
+  useEffect(() => {
+    if (highlightFlowId && cardRefs.current[highlightFlowId]) {
+      cardRefs.current[highlightFlowId].scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [highlightFlowId]);
+
   if (!executions.length) return <Empty text="Live pass/fail feed streams here as workers run…" />;
   return (
     <div className="space-y-3 max-w-4xl">
@@ -24,13 +70,35 @@ export default function ExecutionFeed({ executions }) {
         const meta = FINAL[status] || FINAL.failed;
         const Icon = meta.icon;
         const shot = e.artifacts?.screenshot;
+        const beforeShot = status === "healed" ? e.original_artifacts?.screenshot : null;
+        const isHighlighted = highlightFlowId === e.flow_id;
         return (
-          <div key={e.flow_id} data-testid={`execution-${e.flow_id}`}
-            className={`rounded-xl border p-4 ${meta.cls}`}>
+          <div key={e.flow_id} ref={(el) => (cardRefs.current[e.flow_id] = el)} data-testid={`execution-${e.flow_id}`}
+            className={`rounded-xl border p-4 transition-all duration-500 ${meta.cls} ${
+              isHighlighted ? "ring-2 ring-cyan-400/70 ring-offset-2 ring-offset-[#07090e]" : ""}`}>
             <div className="flex items-start gap-4">
-              {shot && (
+              {beforeShot ? (
+                <div className="shrink-0 flex items-center gap-1.5" data-testid={`execution-before-after-${e.flow_id}`}>
+                  <div className="flex flex-col items-center gap-0.5">
+                    <button type="button" onClick={() => setLightbox({ kind: "image", url: `${ARTIFACT_BASE}${beforeShot}`, name: `${e.flow_name} — before (failed)` })}>
+                      <img src={`${ARTIFACT_BASE}${beforeShot}`} alt="" loading="lazy"
+                        className="w-20 h-14 object-cover object-top rounded-lg border border-rose-500/40 bg-black hover:border-rose-400 transition-colors cursor-zoom-in" />
+                    </button>
+                    <span className="text-[8px] font-mono uppercase text-rose-400">before</span>
+                  </div>
+                  <ArrowRight className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                  <div className="flex flex-col items-center gap-0.5">
+                    <button type="button" data-testid={`execution-screenshot-${e.flow_id}`}
+                      onClick={() => setLightbox({ kind: "image", url: `${ARTIFACT_BASE}${shot}`, name: `${e.flow_name} — after (healed)` })}>
+                      <img src={`${ARTIFACT_BASE}${shot}`} alt="" loading="lazy"
+                        className="w-20 h-14 object-cover object-top rounded-lg border border-emerald-500/40 bg-black hover:border-emerald-400 transition-colors cursor-zoom-in" />
+                    </button>
+                    <span className="text-[8px] font-mono uppercase text-emerald-400">after</span>
+                  </div>
+                </div>
+              ) : shot && (
                 <button type="button" data-testid={`execution-screenshot-${e.flow_id}`}
-                  onClick={() => setLightbox({ url: `${ARTIFACT_BASE}${shot}`, name: e.flow_name })}
+                  onClick={() => setLightbox({ kind: "image", url: `${ARTIFACT_BASE}${shot}`, name: e.flow_name })}
                   className="shrink-0">
                   <img src={`${ARTIFACT_BASE}${shot}`} alt="" loading="lazy"
                     className="w-24 h-16 object-cover object-top rounded-lg border border-slate-700 bg-black hover:border-slate-500 transition-colors cursor-zoom-in" />
@@ -69,17 +137,20 @@ export default function ExecutionFeed({ executions }) {
                     ))}
                   </ol>
                 )}
+                <ConsoleNetworkEvidence execution={e} />
                 {e.artifacts && (
                   <div className="mt-3 flex items-center gap-4 font-mono text-[10px] text-slate-500">
                     {e.artifacts.trace && (
-                      <a href={`${ARTIFACT_BASE}${e.artifacts.trace}`} className="flex items-center gap-1 hover:text-slate-300">
+                      <a href={traceViewerUrl(`${ARTIFACT_BASE}${e.artifacts.trace}`)} target="_blank" rel="noreferrer"
+                        className="flex items-center gap-1 hover:text-slate-300" title="Open in Playwright's trace viewer">
                         <FileArchive className="w-3 h-3" /> trace
                       </a>
                     )}
                     {e.artifacts.video && (
-                      <a href={`${ARTIFACT_BASE}${e.artifacts.video}`} className="flex items-center gap-1 hover:text-slate-300">
+                      <button type="button" onClick={() => setLightbox({ kind: "video", url: `${ARTIFACT_BASE}${e.artifacts.video}`, name: e.flow_name })}
+                        className="flex items-center gap-1 hover:text-slate-300">
                         <Film className="w-3 h-3" /> video
-                      </a>
+                      </button>
                     )}
                   </div>
                 )}
@@ -100,10 +171,12 @@ export default function ExecutionFeed({ executions }) {
               </a>
             )}
           </DialogTitle>
-          {lightbox && (
+          {lightbox && (lightbox.kind === "video" ? (
+            <video src={lightbox.url} controls autoPlay className="w-full rounded-lg border border-slate-800 bg-black" />
+          ) : (
             <img src={lightbox.url} alt={lightbox.name}
               className="w-full rounded-lg border border-slate-800 bg-black" />
-          )}
+          ))}
         </DialogContent>
       </Dialog>
     </div>

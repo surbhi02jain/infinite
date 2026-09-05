@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { Wrench, AlertOctagon, HelpCircle, CircleSlash, ArrowRight, Loader2 } from "lucide-react";
+import { Wrench, AlertOctagon, HelpCircle, CircleSlash, ArrowRight, Loader2, ImageIcon } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "@/api";
+import { api, ARTIFACT_BASE } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Empty, SectionHeader } from "@/components/TestPlanView";
@@ -53,7 +53,7 @@ function ReviewActions({ action, runId, onEventAppend }) {
   );
 }
 
-export default function HealerLog({ healer, runId, onEventAppend }) {
+export default function HealerLog({ healer, runId, onEventAppend, onViewEvidence }) {
   if (!healer.length) return <Empty text="No failures yet — Healer decisions will stream here…" />;
   return (
     <div className="space-y-3 max-w-4xl">
@@ -72,6 +72,23 @@ export default function HealerLog({ healer, runId, onEventAppend }) {
               </div>
               <span className={`shrink-0 px-2 py-0.5 rounded border font-mono text-[10px] font-bold ${meta.cls}`}>{meta.label}</span>
             </div>
+
+            {/* the claim "healed" is only as good as the proof — show it here, not just in the log line */}
+            {a.original_artifacts?.screenshot && a.artifacts?.screenshot && (
+              <div className="mb-3 flex items-center gap-2" data-testid={`healer-before-after-${a.flow_id}`}>
+                <div className="flex flex-col items-center gap-0.5">
+                  <img src={`${ARTIFACT_BASE}${a.original_artifacts.screenshot}`} alt="" loading="lazy"
+                    className="w-24 h-16 object-cover object-top rounded-lg border border-rose-500/40 bg-black" />
+                  <span className="text-[8px] font-mono uppercase text-rose-400">before</span>
+                </div>
+                <ArrowRight className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                <div className="flex flex-col items-center gap-0.5">
+                  <img src={`${ARTIFACT_BASE}${a.artifacts.screenshot}`} alt="" loading="lazy"
+                    className="w-24 h-16 object-cover object-top rounded-lg border border-emerald-500/40 bg-black" />
+                  <span className="text-[8px] font-mono uppercase text-emerald-400">after</span>
+                </div>
+              </div>
+            )}
 
             {/* confidence meter */}
             <div className="mb-3">
@@ -103,6 +120,13 @@ export default function HealerLog({ healer, runId, onEventAppend }) {
 
             {a.decision === "review" && runId && (
               <ReviewActions action={a} runId={runId} onEventAppend={onEventAppend} />
+            )}
+            {onViewEvidence && (
+              <button type="button" data-testid={`healer-view-evidence-${a.flow_id}`}
+                onClick={() => onViewEvidence(a.flow_id)}
+                className="mt-3 flex items-center gap-1.5 text-[11px] font-mono text-slate-500 hover:text-cyan-400">
+                <ImageIcon className="w-3.5 h-3.5" /> View full evidence (steps, video, trace) →
+              </button>
             )}
           </div>
         );

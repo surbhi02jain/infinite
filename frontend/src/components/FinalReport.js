@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RTooltip } from "recharts";
-import { FileJson, FileCode2, ShieldAlert, Gauge, Target, PieChart as PieIcon } from "lucide-react";
+import { FileJson, FileCode2, ShieldAlert, Gauge, Target, PieChart as PieIcon, Repeat } from "lucide-react";
 import { toast } from "sonner";
 import { API } from "@/api";
 import { Empty } from "@/components/TestPlanView";
@@ -38,7 +38,7 @@ function MetricCard({ k, v, suffix, cls }) {
   );
 }
 
-export default function FinalReport({ report, runId, run }) {
+export default function FinalReport({ report, runId, run, onViewEvidence }) {
   if (!report) return <Empty text="Final quality report generates at the end of the pipeline…" />;
   const s = report.summary || {};
   const hadPrd = Boolean(run?.config?.prd);
@@ -173,7 +173,7 @@ export default function FinalReport({ report, runId, run }) {
           <div className="rounded-xl border border-slate-800 overflow-hidden">
             <table className="w-full text-sm">
               <thead className="bg-[#0a0f18]"><tr className="text-slate-500 font-mono text-[10px] uppercase tracking-wider">
-                <th className="text-left p-3">Flow</th><th className="text-left p-3">Type</th><th className="text-left p-3">Severity</th><th className="text-left p-3">Confidence</th><th className="text-left p-3">Rationale</th>
+                <th className="text-left p-3">Flow</th><th className="text-left p-3">Type</th><th className="text-left p-3">Severity</th><th className="text-left p-3">Confidence</th><th className="text-left p-3">Rationale</th><th className="text-left p-3"></th>
               </tr></thead>
               <tbody>
                 {report.defects.map((d, i) => (
@@ -183,6 +183,15 @@ export default function FinalReport({ report, runId, run }) {
                     <td className="p-3"><span className={`font-mono text-[11px] uppercase ${d.severity === "critical" || d.severity === "high" ? "text-rose-300" : "text-amber-300"}`}>{d.severity}</span></td>
                     <td className="p-3 font-mono text-slate-300">{Math.round((d.confidence || 0) * 100)}%</td>
                     <td className="p-3 text-[12px] text-slate-400 max-w-md">{d.rationale}</td>
+                    <td className="p-3">
+                      {onViewEvidence && (
+                        <button type="button" data-testid={`defect-view-evidence-${d.flow_id}`}
+                          onClick={() => onViewEvidence(d.flow_id)}
+                          className="font-mono text-[11px] text-slate-500 hover:text-cyan-400 whitespace-nowrap">
+                          View evidence →
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -190,6 +199,35 @@ export default function FinalReport({ report, runId, run }) {
           </div>
         ) : <p className="text-[13px] text-emerald-400 rounded-lg border border-slate-800 bg-[#0b111c] p-4">✓ No genuine application defects flagged.</p>}
       </div>
+
+      {/* flakiness trend across runs against this same target */}
+      {report.flakiness_trend?.length > 0 && (
+        <div>
+          <h4 className="font-mono text-[11px] uppercase tracking-widest text-slate-500 mb-2 flex items-center gap-2">
+            <Repeat className="w-3.5 h-3.5 text-amber-400" /> Flakiness Trend (this target, across runs)
+          </h4>
+          <p className="text-[12px] text-slate-500 mb-2">
+            A flow needing healing repeatedly is a maintenance smell, not a win — tracked here across every run against this same URL, not just this one.
+          </p>
+          <div className="rounded-xl border border-slate-800 overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-[#0a0f18]"><tr className="text-slate-500 font-mono text-[10px] uppercase tracking-wider">
+                <th className="text-left p-3">Flow</th><th className="text-left p-3">Healed</th><th className="text-left p-3">Runs Seen</th><th className="text-left p-3">Heal Rate</th>
+              </tr></thead>
+              <tbody>
+                {report.flakiness_trend.map((f, i) => (
+                  <tr key={i} className="border-t border-slate-800 bg-[#0b111c]">
+                    <td className="p-3 text-slate-200">{f.flow_name}</td>
+                    <td className="p-3 font-mono text-slate-300">{f.heal_count}</td>
+                    <td className="p-3 font-mono text-slate-400">{f.runs_seen}/{f.total_runs}</td>
+                    <td className="p-3"><span className={`font-mono text-[11px] ${f.rate >= 50 ? "text-rose-300" : "text-amber-300"}`}>{f.rate}%</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

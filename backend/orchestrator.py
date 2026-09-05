@@ -403,25 +403,19 @@ class Orchestrator:
         return specs
 
     # ---- RUN ----
-    async def _stage_run(self, run_id, config, surface, specs):
-        await self.set_stage(run_id, "RUN", "running")
-        workers = max(1, int(config.get("workers", 3)))
-        await self.emit(run_id, "RUN", "runner", "info", "stage_start",
-                        f"Runner executing {len(specs)} specs on real headless Chromium ({workers} parallel workers)...")
+    async def _run_flows(self, run_id, config, surface, specs, workers=1, on_step=None, on_result=None):
+        """Sole owner of the Playwright browser lifecycle for executing flows. Both the main RUN
+        stage (batch, parallel, persisted) and HEAL's live-replay verification (a single patched
+        spec, not persisted directly) call this instead of each launching their own browser — so
+        launch config (headless, slow_mo) can never drift between a flow's first run and its
+        healed re-run, which is exactly what happened when HEAL used to manage its own browser."""
         storage_state_path = surface.get("storage_state_path")
         executions = []
+        workers = max(1, workers)
         sem = asyncio.Semaphore(workers)
         worker_slots = asyncio.Queue()
         for i in range(1, workers + 1):
             worker_slots.put_nowait(i)
-
-        async def on_step(spec, step_entry, total_steps):
-            lvl = "info" if step_entry["ok"] else "warn"
-            note = f" — {step_entry['note']}" if step_entry.get("note") else ""
-            await self.emit(run_id, "RUN", "runner", lvl, "step",
-                            f"[{spec['flow_name']}] step {step_entry['index']}/{total_steps}: "
-                            f"{step_entry['description']}{note}",
-                            {"flow_id": spec["flow_id"], "step": step_entry})
 
         async def run_one(browser, spec):
             worker_id = await worker_slots.get()
@@ -445,14 +439,36 @@ class Orchestrator:
                 for coro in asyncio.as_completed(tasks):
                     ex = await coro
                     executions.append(ex)
-                    await self.db.executions.insert_one(dict(ex))
-                    ex.pop("_id", None)
-                    lvl = "success" if ex["status"] == "passed" else "error"
-                    await self.emit(run_id, "RUN", "runner", lvl, "exec_result",
-                                    f"[worker {ex['worker']}] {ex['flow_name']} -> {ex['status'].upper()} ({ex['duration']}s)",
-                                    {"execution": ex})
+                    if on_result:
+                        await on_result(ex)
             finally:
                 await browser.close()
+        return executions
+
+    async def _stage_run(self, run_id, config, surface, specs):
+        await self.set_stage(run_id, "RUN", "running")
+        workers = max(1, int(config.get("workers", 3)))
+        await self.emit(run_id, "RUN", "runner", "info", "stage_start",
+                        f"Runner executing {len(specs)} specs on real headless Chromium ({workers} parallel workers)...")
+
+        async def on_step(spec, step_entry, total_steps):
+            lvl = "info" if step_entry["ok"] else "warn"
+            note = f" — {step_entry['note']}" if step_entry.get("note") else ""
+            await self.emit(run_id, "RUN", "runner", lvl, "step",
+                            f"[{spec['flow_name']}] step {step_entry['index']}/{total_steps}: "
+                            f"{step_entry['description']}{note}",
+                            {"flow_id": spec["flow_id"], "step": step_entry})
+
+        async def on_result(ex):
+            await self.db.executions.insert_one(dict(ex))
+            ex.pop("_id", None)
+            lvl = "success" if ex["status"] == "passed" else "error"
+            await self.emit(run_id, "RUN", "runner", lvl, "exec_result",
+                            f"[worker {ex['worker']}] {ex['flow_name']} -> {ex['status'].upper()} ({ex['duration']}s)",
+                            {"execution": ex})
+
+        executions = await self._run_flows(run_id, config, surface, specs, workers=workers,
+                                            on_step=on_step, on_result=on_result)
 
         passed = sum(1 for e in executions if e["status"] == "passed")
         await self.emit(run_id, "RUN", "runner", "info", "stage_complete",
@@ -466,120 +482,143 @@ class Orchestrator:
         failures = [e for e in executions if e["status"] == "failed"]
         known = _known_selectors(surface)
         spec_by_flow = {s["flow_id"]: s for s in specs}
-        storage_state_path = surface.get("storage_state_path")
         await self.emit(run_id, "HEAL", "healer", "info", "stage_start",
                         f"Healer analyzing {len(failures)} failures (heuristic rules + {model} classification)...")
         actions = []
-        # a proposed "script" heal is only provisional until replayed in a live browser — lazily
-        # launch one shared Chromium instance for the whole stage rather than per-heal.
-        replay_pw, replay_browser = None, None
-        try:
-            for e in failures:
-                ft = e.get("fail_type")
-                # heuristic-first decision — deterministic for clear signals
-                if ft == "selector-not-found":
-                    forced, base_conf = "script", 0.91
-                elif ft in ("network-5xx", "console-exception"):
-                    forced, base_conf = "defect", 0.9
-                else:  # assertion-failed -> ambiguous, let LLM arbitrate
-                    forced, base_conf = None, 0.7
-                system = ("You are a self-healing test classifier. Decide if a failed test is a SCRIPT issue "
-                          "(heal it) or a genuine APP DEFECT, or NEEDS REVIEW. When it is a SCRIPT issue, propose a "
-                          "concrete stable replacement locator using the provided known-good selectors. Return ONLY "
-                          "JSON: {\"decision\":\"script|defect|review\",\"confidence\":0.0-1.0,\"rationale\":\"...\","
-                          "\"heal\":{\"old_selector\":\"...\",\"new_selector\":\"...\"},"
-                          "\"severity\":\"critical|high|medium|low\"}")
-                # only invoke the LLM for genuinely ambiguous signals (assertion-failed);
-                # clear signals are resolved deterministically to stay fast & within rate limits
-                if forced is None:
-                    prompt = (f"FLOW: {e['flow_name']} ({e['flow_type']})\nFAIL TYPE: {ft}\nERROR: {e.get('error')}\n"
-                              f"CONSOLE: {e.get('console_errors')}\nNETWORK: {e.get('network')}\n"
-                              f"KNOWN-GOOD SELECTORS ON PAGE: {json.dumps(known[:20])}\n"
-                              "Classify as script (heal), defect, or review, and if script propose a heal.")
-                    data, _ = await self._safe_llm(system, prompt, model, run_id, "HEAL", "healer")
-                    data = data if isinstance(data, dict) else {}
-                else:
-                    data = {}
-                decision = forced or (data.get("decision") or "review")
-                confidence = float(data.get("confidence") or base_conf)
-                rationale = data.get("rationale") or _default_rationale(ft, decision)
-                heal = data.get("heal") or {}
-                if decision == "script" and not heal.get("new_selector"):
-                    old_sel = e.get("error", "").split("`")[1] if "`" in e.get("error", "") else "stale locator"
-                    new_sel = (next((k for k in known if "data-testid" in k), None)
-                               or "getByRole('button', { name: /submit/i })")
-                    heal = {"old_selector": old_sel, "new_selector": new_sel}
-                action = {"id": str(uuid.uuid4()), "run_id": run_id, "execution_id": e["id"], "flow_id": e["flow_id"],
-                          "flow_name": e["flow_name"], "fail_type": ft, "decision": decision,
-                          "confidence": round(confidence, 2), "rationale": rationale,
-                          "heal": heal, "severity": data.get("severity") or ("high" if decision == "defect" else "low")}
+        for e in failures:
+            ft = e.get("fail_type")
+            # heuristic-first decision — deterministic for clear signals
+            if ft == "selector-not-found":
+                forced, base_conf = "script", 0.91
+            elif ft in ("network-5xx", "console-exception"):
+                forced, base_conf = "defect", 0.9
+            else:  # assertion-failed -> ambiguous, let LLM arbitrate
+                forced, base_conf = None, 0.7
+            system = ("You are a self-healing test classifier. Decide if a failed test is a SCRIPT issue "
+                      "(heal it) or a genuine APP DEFECT, or NEEDS REVIEW. When it is a SCRIPT issue, propose a "
+                      "concrete stable replacement locator using the provided known-good selectors. Return ONLY "
+                      "JSON: {\"decision\":\"script|defect|review\",\"confidence\":0.0-1.0,\"rationale\":\"...\","
+                      "\"heal\":{\"old_selector\":\"...\",\"new_selector\":\"...\"},"
+                      "\"severity\":\"critical|high|medium|low\"}")
+            # only invoke the LLM for genuinely ambiguous signals (assertion-failed);
+            # clear signals are resolved deterministically to stay fast & within rate limits
+            if forced is None:
+                prompt = (f"FLOW: {e['flow_name']} ({e['flow_type']})\nFAIL TYPE: {ft}\nERROR: {e.get('error')}\n"
+                          f"CONSOLE: {e.get('console_errors')}\nNETWORK: {e.get('network')}\n"
+                          f"KNOWN-GOOD SELECTORS ON PAGE: {json.dumps(known[:20])}\n"
+                          "Classify as script (heal), defect, or review, and if script propose a heal.")
+                data, _ = await self._safe_llm(system, prompt, model, run_id, "HEAL", "healer")
+                data = data if isinstance(data, dict) else {}
+            else:
+                data = {}
+            decision = forced or (data.get("decision") or "review")
+            confidence = float(data.get("confidence") or base_conf)
+            rationale = data.get("rationale") or _default_rationale(ft, decision)
+            heal = data.get("heal") or {}
+            if decision == "script" and not heal.get("new_selector"):
+                old_sel = e.get("error", "").split("`")[1] if "`" in e.get("error", "") else "stale locator"
+                new_sel = (next((k for k in known if "data-testid" in k), None)
+                           or "getByRole('button', { name: /submit/i })")
+                heal = {"old_selector": old_sel, "new_selector": new_sel}
+            action = {"id": str(uuid.uuid4()), "run_id": run_id, "execution_id": e["id"], "flow_id": e["flow_id"],
+                      "flow_name": e["flow_name"], "fail_type": ft, "decision": decision,
+                      "confidence": round(confidence, 2), "rationale": rationale,
+                      "heal": heal, "severity": data.get("severity") or ("high" if decision == "defect" else "low")}
 
-                if decision == "script":
-                    # actually replay the flow in a live browser with the proposed selector patched
-                    # in, instead of assuming the heal worked — a fix that doesn't verify is not a fix.
-                    spec = spec_by_flow.get(e["flow_id"])
-                    replay_ex, replay_err = None, None
-                    if spec and heal.get("new_selector"):
-                        try:
-                            if replay_browser is None:
-                                replay_pw = await async_playwright().start()
-                                replay_browser = await replay_pw.chromium.launch(headless=True)
-                            patched_spec = dict(spec)
-                            patched_spec["selectors"] = (
-                                [{"selector": heal["new_selector"], "status": "healed"}]
-                                + list(spec.get("selectors", [])))
-                            flow = {"flow_id": spec["flow_id"], "steps": spec.get("flow_steps") or []}
-                            replay_ex = await pw_engine.run_flow_pw(
-                                run_id, replay_browser, storage_state_path, config, flow, patched_spec, on_step=None)
-                        except Exception as ex:
-                            replay_err = str(ex)[:150]
+            if decision == "script":
+                # a proposed heal is only provisional until replayed for real, and HEAL is not the
+                # one that owns a browser to do that — RUN (via `_run_flows`) is, exactly as it is
+                # for every other flow execution in this pipeline. HEAL's job stops at diagnosing
+                # and proposing; verifying the proposal is RUN's job, called back into here.
+                spec = spec_by_flow.get(e["flow_id"])
+                replay_ex, replay_err = None, None
+                if spec and heal.get("new_selector"):
+                    try:
+                        patched_spec = dict(spec)
+                        patched_spec["selectors"] = (
+                            [{"selector": heal["new_selector"], "status": "healed"}]
+                            + list(spec.get("selectors", [])))
+                        replay_results = await self._run_flows(run_id, config, surface, [patched_spec], workers=1)
+                        replay_ex = replay_results[0] if replay_results else None
+                    except Exception as ex:
+                        replay_err = str(ex)[:150]
 
-                    if replay_ex and replay_ex.get("status") == "passed":
-                        action["healed"] = True
-                        action["result"] = f"Re-located element, replayed the flow in a live browser: PASSED ({replay_ex['duration']}s)."
-                        await self.db.executions.update_one({"id": e["id"]}, {"$set": {
-                            "final_status": "healed", "healed": True,
-                            "artifacts": replay_ex.get("artifacts"), "duration": replay_ex.get("duration")}})
-                        await self.emit(run_id, "HEAL", "healer", "success", "healer_action",
-                                        f"HEALED {e['flow_name']}: {action['heal'].get('old_selector','selector')} -> "
-                                        f"{action['heal'].get('new_selector','stable locator')} | live re-run PASSED "
-                                        f"({replay_ex['duration']}s, conf {action['confidence']})", {"action": action})
-                    else:
-                        # the proposed heal did not actually verify — be honest and escalate rather
-                        # than reporting a fix that didn't happen.
-                        decision = "review"
-                        action["decision"] = "review"
-                        action["healed"] = False
-                        detail = replay_err or (replay_ex or {}).get("error") or "replay still failed"
-                        action["result"] = f"Proposed heal did not verify on live replay ({detail}); escalated for human review."
-                        await self.db.executions.update_one({"id": e["id"]}, {"$set": {"final_status": "review"}})
-                        await self.emit(run_id, "HEAL", "healer", "warn", "healer_action",
-                                        f"HEAL ATTEMPTED for {e['flow_name']} but did not verify on live replay "
-                                        f"({detail}) — escalating to review instead of reporting a false fix.",
-                                        {"action": action})
-                elif decision == "defect":
-                    defect = {"id": str(uuid.uuid4()), "run_id": run_id, "flow_id": e["flow_id"],
-                              "flow_name": e["flow_name"], "fail_type": ft, "confidence": action["confidence"],
-                              "severity": action["severity"], "rationale": rationale}
-                    await self.db.defects.insert_one(dict(defect))
-                    await self.db.executions.update_one({"id": e["id"]}, {"$set": {"final_status": "defect"}})
-                    await self.emit(run_id, "HEAL", "healer", "error", "healer_action",
-                                    f"APP DEFECT flagged in {e['flow_name']} [{action['severity'].upper()}] "
-                                    f"(conf {action['confidence']}): {rationale}", {"action": action})
+                if replay_ex and replay_ex.get("status") == "passed":
+                    action["healed"] = True
+                    action["result"] = f"Re-located element, replayed the flow in a live browser: PASSED ({replay_ex['duration']}s)."
+                    # keep the ORIGINAL failure evidence (screenshot/error) alongside the new passing
+                    # one instead of overwriting it — "broken, then fixed, both provable" is the one
+                    # piece of evidence that actually earns trust in a self-healing claim; a healed
+                    # card with only a passing screenshot is just an assertion again.
+                    await self.db.executions.update_one({"id": e["id"]}, {"$set": {
+                        "final_status": "healed", "healed": True,
+                        "artifacts": replay_ex.get("artifacts"), "duration": replay_ex.get("duration"),
+                        "original_artifacts": e.get("artifacts"), "original_error": e.get("error")}})
+                    # the live SSE event is the frontend's only source of truth mid-run (it doesn't
+                    # re-poll the DB per execution) — carry the before/after evidence on the event
+                    # itself, not just in Mongo, or the UI never sees it until the page is reloaded.
+                    action["artifacts"] = replay_ex.get("artifacts")
+                    action["original_artifacts"] = e.get("artifacts")
+                    await self.emit(run_id, "HEAL", "healer", "success", "healer_action",
+                                    f"HEALED {e['flow_name']}: {action['heal'].get('old_selector','selector')} -> "
+                                    f"{action['heal'].get('new_selector','stable locator')} | live re-run PASSED "
+                                    f"({replay_ex['duration']}s, conf {action['confidence']})", {"action": action})
+
+                    # persist the verified fix into the exported spec itself — a heal that only
+                    # lives in this run's in-memory replay would be re-discovered from scratch
+                    # (and re-cost an LLM call) every future run, and anyone exporting the .spec.js
+                    # today would walk straight into the same stale locator this heal just proved
+                    # is broken.
+                    old_sel, new_sel = heal.get("old_selector"), heal.get("new_selector")
+                    if spec and new_sel:
+                        code = spec.get("code") or ""
+                        if old_sel and old_sel in code:
+                            code = code.replace(old_sel, new_sel)
+                        spec["code"] = code
+                        spec["selectors"] = (
+                            [{"selector": new_sel, "status": "healed"}]
+                            + [s for s in spec.get("selectors", []) if s.get("selector") != old_sel])
+                        spec.setdefault("healed_selectors", []).append({
+                            "old_selector": old_sel, "new_selector": new_sel,
+                            "confidence": action["confidence"], "healed_at": now_iso()})
+                        await self.db.test_specs.update_one({"id": spec["id"]}, {"$set": {
+                            "code": spec["code"], "selectors": spec["selectors"],
+                            "healed_selectors": spec["healed_selectors"]}})
+                        await self.emit(run_id, "HEAL", "healer", "success", "spec_healed",
+                                        f"Spec {spec['filename']} updated in place: "
+                                        f"{old_sel or 'stale locator'} -> {new_sel}. Export now reflects the "
+                                        "verified fix, not the original guess.", {"spec": spec})
                 else:
+                    # the proposed heal did not actually verify — be honest and escalate rather
+                    # than reporting a fix that didn't happen.
+                    decision = "review"
+                    action["decision"] = "review"
+                    action["healed"] = False
+                    detail = replay_err or (replay_ex or {}).get("error") or "replay still failed"
+                    action["result"] = f"Proposed heal did not verify on live replay ({detail}); escalated for human review."
                     await self.db.executions.update_one({"id": e["id"]}, {"$set": {"final_status": "review"}})
                     await self.emit(run_id, "HEAL", "healer", "warn", "healer_action",
-                                    f"NEEDS REVIEW {e['flow_name']} (conf {action['confidence']}): {rationale}",
+                                    f"HEAL ATTEMPTED for {e['flow_name']} but did not verify on live replay "
+                                    f"({detail}) — escalating to review instead of reporting a false fix.",
                                     {"action": action})
-                await self.db.healer_actions.insert_one(dict(action))
-                action.pop("_id", None)
-                actions.append(action)
-                await asyncio.sleep(0.1)
-        finally:
-            if replay_browser:
-                await replay_browser.close()
-            if replay_pw:
-                await replay_pw.stop()
+            elif decision == "defect":
+                defect = {"id": str(uuid.uuid4()), "run_id": run_id, "flow_id": e["flow_id"],
+                          "flow_name": e["flow_name"], "fail_type": ft, "confidence": action["confidence"],
+                          "severity": action["severity"], "rationale": rationale}
+                await self.db.defects.insert_one(dict(defect))
+                await self.db.executions.update_one({"id": e["id"]}, {"$set": {"final_status": "defect"}})
+                await self.emit(run_id, "HEAL", "healer", "error", "healer_action",
+                                f"APP DEFECT flagged in {e['flow_name']} [{action['severity'].upper()}] "
+                                f"(conf {action['confidence']}): {rationale}", {"action": action})
+            else:
+                await self.db.executions.update_one({"id": e["id"]}, {"$set": {"final_status": "review"}})
+                await self.emit(run_id, "HEAL", "healer", "warn", "healer_action",
+                                f"NEEDS REVIEW {e['flow_name']} (conf {action['confidence']}): {rationale}",
+                                {"action": action})
+            await self.db.healer_actions.insert_one(dict(action))
+            action.pop("_id", None)
+            actions.append(action)
+            await asyncio.sleep(0.1)
 
         await self.emit(run_id, "HEAL", "healer", "success", "stage_complete",
                         f"Healer done: {sum(1 for a in actions if a['decision']=='script')} healed, "
@@ -589,6 +628,34 @@ class Orchestrator:
         return actions
 
     # ---- REPORT ----
+    async def _compute_flakiness_trend(self, config):
+        """A flow that needs healing run after run against the same target is the 'smell, not a
+        success' signal self-healing governance is built around — surface it explicitly rather than
+        letting a rising heal rate hide inside a run-by-run green pass rate."""
+        url = config.get("url")
+        if not url:
+            return []
+        run_ids = [r["id"] for r in await self.db.runs.find({"url": url}, {"id": 1}).to_list(500)]
+        if len(run_ids) < 2:
+            return []
+        actions = await self.db.healer_actions.find(
+            {"run_id": {"$in": run_ids}}, {"_id": 0, "run_id": 1, "flow_name": 1, "healed": 1, "decision": 1}
+        ).to_list(5000)
+        by_flow = {}
+        for a in actions:
+            name = a.get("flow_name") or "unknown flow"
+            d = by_flow.setdefault(name, {"flow_name": name, "heal_count": 0, "runs_seen": set()})
+            d["runs_seen"].add(a["run_id"])
+            if a.get("healed") or a.get("decision") == "script":
+                d["heal_count"] += 1
+        total_runs = len(run_ids)
+        trend = [{"flow_name": d["flow_name"], "heal_count": d["heal_count"],
+                  "runs_seen": len(d["runs_seen"]), "total_runs": total_runs,
+                  "rate": round(100 * d["heal_count"] / total_runs)}
+                 for d in by_flow.values() if d["heal_count"] > 0]
+        trend.sort(key=lambda x: -x["heal_count"])
+        return trend[:10]
+
     async def _stage_report(self, run_id, config, surface, flows, specs, executions, actions):
         await self.set_stage(run_id, "REPORT", "running")
         await self.emit(run_id, "REPORT", "reporter", "info", "stage_start", "Aggregating final test-quality report...")
@@ -605,14 +672,16 @@ class Orchestrator:
         high_gaps = sum(1 for g in gaps if str(g.get("severity")).lower() == "high")
         risk_index = min(100, len(gaps) * 8 + high_gaps * 10 + len(defects) * 6 + review * 5)
         prd_gaps = (plan or {}).get("evaluation", {}).get("prd_gaps", [])
+        flakiness_trend = await self._compute_flakiness_trend(config)
         report = {"id": str(uuid.uuid4()), "run_id": run_id, "created_at": now_iso(),
                   "summary": {"total_flows": len(flows), "total_specs": len(specs), "total_executions": total,
                               "passed": passed, "healed": healed, "defects": len(defects), "needs_review": review,
                               "pass_rate": pass_rate, "untested_risk_index": risk_index,
-                              "coverage_gaps": len(gaps), "prd_gaps": len(prd_gaps)},
+                              "coverage_gaps": len(gaps), "prd_gaps": len(prd_gaps),
+                              "flaky_flows": len(flakiness_trend)},
                   "defects": defects, "coverage_gaps": gaps, "prd_gaps": prd_gaps,
                   "healer_actions": actions, "risk_notes": (plan or {}).get("evaluation", {}).get("risk_notes", []),
-                  "flows": flows, "executions": finals}
+                  "flows": flows, "executions": finals, "flakiness_trend": flakiness_trend}
         await self.db.reports.update_one({"run_id": run_id}, {"$set": report}, upsert=True)
         report.pop("_id", None)
         await self.db.runs.update_one({"id": run_id}, {"$set": {"report_summary": report["summary"]}})

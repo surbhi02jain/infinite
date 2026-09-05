@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Copy, CheckCircle2, FileCode, ShieldCheck, ShieldAlert, Download, Info } from "lucide-react";
+import { Copy, CheckCircle2, FileCode, ShieldCheck, ShieldAlert, Download, Info, Wrench, ArrowRight } from "lucide-react";
 import { toast } from "sonner";
 import { Empty } from "@/components/TestPlanView";
 import { ARTIFACT_BASE } from "@/api";
@@ -53,6 +53,7 @@ export default function CodeViewer({ specs, runId, run }) {
                 <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${TYPE_DOT[s.flow_type] || "bg-slate-500"}`} />
                 <FileCode className="w-3.5 h-3.5 text-slate-500 shrink-0" />
                 <span className="font-mono text-[11px] text-slate-300 truncate">{s.filename}</span>
+                {s.healed_selectors?.length > 0 && <Wrench className="w-3 h-3 text-amber-400 shrink-0" />}
               </div>
               <div className="mt-1 ml-5 flex items-center gap-1 font-mono text-[9px]">
                 {verified === s.selectors.length ? (
@@ -82,6 +83,19 @@ export default function CodeViewer({ specs, runId, run }) {
               actual locators, screenshots and pass/fail from the real live-browser execution, which drives its own
               interpreter rather than this file.</span>
           </div>
+          {spec.healed_selectors?.length > 0 && (
+            <div className="flex flex-col gap-1" data-testid="spec-healed-diff">
+              {spec.healed_selectors.map((h, i) => (
+                <div key={i} className="flex items-center gap-1.5 text-[11px] text-amber-300">
+                  <Wrench className="w-3 h-3 shrink-0" />
+                  <span>Self-healed{h.confidence != null ? ` (conf ${Math.round(h.confidence * 100)}%)` : ""}:</span>
+                  <code className="text-slate-400 line-through">{h.old_selector || "stale locator"}</code>
+                  <ArrowRight className="w-3 h-3 shrink-0" />
+                  <code className="text-emerald-300">{h.new_selector}</code>
+                </div>
+              ))}
+            </div>
+          )}
           {needsStorageState && (
             <a href={storageStateUrl} download="storageState.json" data-testid="download-storage-state-link"
               className="flex items-center gap-1.5 text-[11px] text-amber-300 hover:text-amber-200 w-fit">

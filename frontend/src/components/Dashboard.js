@@ -19,6 +19,7 @@ export default function Dashboard() {
   const [showForm, setShowForm] = useState(true);
   const [live, setLive] = useState(false);
   const [activeTab, setActiveTab] = useState("plan");
+  const [highlightFlowId, setHighlightFlowId] = useState(null);
   const connRef = useRef(null);
   const pollRef = useRef(null);
   const seqRef = useRef(0);
@@ -111,6 +112,14 @@ export default function Dashboard() {
 
   const newRun = () => { cleanup(); setShowForm(true); setActiveRunId(null); activeRef.current = null; setRun(null); setEvents([]); setLive(false); };
 
+  // "View Evidence" jump: a defect/heal claim made elsewhere (Report, Healer log) should lead
+  // straight to the concrete proof for it, not make the user go hunt through the Runner tab.
+  const viewEvidence = useCallback((flowId) => {
+    setActiveTab("exec");
+    setHighlightFlowId(flowId);
+    setTimeout(() => setHighlightFlowId((cur) => (cur === flowId ? null : cur)), 2500);
+  }, []);
+
   return (
     <div className="h-screen flex flex-col bg-[#07090e] text-slate-100 overflow-hidden grain">
       {/* header */}
@@ -161,7 +170,8 @@ export default function Dashboard() {
               <div className="flex-1 flex overflow-hidden">
                 <div className="flex-1 overflow-hidden flex flex-col border-r border-slate-800/80">
                   <WorkspaceTabs derived={derived} runId={activeRunId} run={run}
-                    activeTab={activeTab} onTabChange={setActiveTab} onEventAppend={pushEvent} />
+                    activeTab={activeTab} onTabChange={setActiveTab} onEventAppend={pushEvent}
+                    highlightFlowId={highlightFlowId} onViewEvidence={viewEvidence} />
                 </div>
                 <EventConsole events={events} live={live} />
               </div>
