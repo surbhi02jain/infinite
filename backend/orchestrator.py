@@ -89,12 +89,25 @@ def _extract_json(text: str):
 
 def surface_summary(surface: dict) -> str:
     lines = [f"Base URL: {surface['base_url']}"]
-    for p in surface["pages"][:6]:
-        lines.append(f"\nPAGE {p['url']} (status {p.get('status')}) title='{p.get('title','')}'")
+    # not just [:6] — action-chain-discovered pages (cart/checkout-style screens only reachable via
+    # a button click, appended after the link crawl) must survive this cap too, or the Planner never
+    # even sees the surface evidence for the flows we most want it to write.
+    for p in surface["pages"][:10]:
+        via = " [reached by clicking a button, not a link]" if p.get("discovered_via") == "action_chain" else ""
+        lines.append(f"\nPAGE {p['url']}{via} (status {p.get('status')}) title='{p.get('title','')}'")
         if p.get("links"):
             lines.append("  Links: " + ", ".join(sorted({l['text'] for l in p['links'] if l['text']})[:12]))
         if p.get("buttons"):
             lines.append("  Buttons: " + ", ".join(sorted(set(p['buttons']))[:12]))
+        if p.get("button_selectors"):
+            # real id / data-test(id) identifiers paired with visible text, e.g. "Add to cart"~add-to-
+            # cart-sauce-labs-backpack — without this the Planner/Generator only ever see generic
+            # button text and can't write a stable locator for it. Deliberately not prefixed with "#"
+            # or "data-testid=" — the identifier may come from either an id or a data-test/data-testid
+            # attribute and we can't cheaply tell which here, so GENERATE should resolve it with
+            # getByTestId(...) or whichever of #id / [data-test] / [data-testid] actually matches.
+            lines.append("  Button selectors (id or data-test/data-testid identifier): " + ", ".join(
+                f"\"{b['text']}\"~{b['selector']}" for b in p['button_selectors'][:12] if b.get('text')))
         for f in p.get("forms", []):
             fn = ", ".join(x["name"] or x["type"] for x in f["fields"])
             lines.append(f"  Form[{f['method']} {f['action']}]: {fn}")
@@ -203,12 +216,20 @@ class Orchestrator:
         surface = await pw_engine.explore_target_pw(
             run_id, config["url"], config.get("login_url"), config.get("username"), config.get("password"))
         for p in surface["pages"]:
+            via = " (found by clicking a button, not a link)" if p.get("discovered_via") == "action_chain" else ""
             await self.emit(run_id, "EXPLORE", "explorer", "info", "log",
-                            f"Mapped {p['url']} -> status {p.get('status')}, "
+                            f"Mapped {p['url']}{via} -> status {p.get('status')}, "
                             f"{len(p.get('links', []))} links, {len(p.get('forms', []))} forms, "
                             f"{len(p.get('buttons', []))} buttons",
                             {"page": p})
             await asyncio.sleep(0.1)
+        action_pages = [p for p in surface["pages"] if p.get("discovered_via") == "action_chain"]
+        if action_pages:
+            await self.emit(run_id, "EXPLORE", "explorer", "success", "log",
+                            f"Action-chain discovery walked the primary call-to-action buttons "
+                            f"(add-to-cart -> cart -> checkout -> continue) and found "
+                            f"{len(action_pages)} additional screen(s) a link-only crawl would have "
+                            "missed entirely: " + ", ".join(urlparse(p["url"]).path or p["url"] for p in action_pages))
         if config.get("auth_mode") == "authenticated":
             auth = surface.get("auth") or {}
             if auth.get("ok"):
@@ -286,6 +307,11 @@ class Orchestrator:
             await self.emit(run_id, "EVALUATE", "evaluator", "info", "log",
                             "LLM audit unavailable; using heuristic coverage-gap analysis "
                             "(discovered-surface + PRD-keyword matching) so the audit stage never goes silent.")
+        # structural guarantee, independent of whether the LLM audit ran or what it noticed: if
+        # EXPLORE's action-chain walk found cart/checkout-style screens (only reachable via a button
+        # click), the plan MUST exercise them — an "end-to-end" claim can't rest on the LLM
+        # remembering to prioritize the business-critical flow among everything else it could pick.
+        _ensure_action_chain_coverage(surface, flows, data)
         if second_pass:
             # don't re-append flows the previous pass already added
             existing_names = {f.get("name", "").lower() for f in flows}
@@ -358,6 +384,12 @@ class Orchestrator:
             spec = {"id": str(uuid.uuid4()), "run_id": run_id, "flow_id": f["flow_id"], "flow_name": f["name"],
                     "flow_type": f["type"], "filename": filename, "code": code, "selectors": validated,
                     "flow_steps": f.get("steps") or []}
+            if f.get("step_selectors"):
+                # per-step candidates verified during EXPLORE's action-chain walk (see
+                # _action_chain_flow_steps) — takes priority over the flow-wide `selectors` pool
+                # above for whichever steps have one, since some targets (an icon-only cart link with
+                # no visible text) can only ever be found this way, not by matching step wording.
+                spec["step_selectors"] = f["step_selectors"]
             specs.append(spec)
             await self.db.test_specs.insert_one(dict(spec))
             spec.pop("_id", None)
@@ -635,7 +667,12 @@ def _known_selectors(surface):
             sels.append(f"[data-testid=\"{i['selector']}\"]")
             sels.append(f"#{i['selector']}")
         for bs in p.get("button_selectors", []):
+            # the identifier may actually be a plain `id`, a `data-testid`, or (e.g. saucedemo's
+            # cart icon) a `data-test` attribute — offer all three literal forms as candidates so
+            # whichever one GENERATE copies verbatim actually resolves against the live DOM instead
+            # of only fuzzy-passing validation and then finding zero elements at RUN time.
             sels.append(f"[data-testid=\"{bs['selector']}\"]")
+            sels.append(f"[data-test=\"{bs['selector']}\"]")
             sels.append(f"#{bs['selector']}")
         for b in p.get("buttons", []):
             if b:
@@ -674,12 +711,69 @@ def _selector_valid(sel, known):
     return bool(ROBUST_PATTERNS.search(s))
 
 
+_ACTION_CHAIN_STEP_LABELS = ["Add an item to the cart", "Open the cart", "Proceed to checkout",
+                             "Continue past checkout details", "Finish and place the order"]
+
+
+def _action_chain_flow_steps(surface):
+    """Builds (steps, step_selectors) that exactly mirror what EXPLORE's action-chain walk actually
+    clicked through (pw_engine._discover_action_chain's `hops`) — not generic natural-language steps
+    like "Open the cart". Several of these controls (e.g. a cart icon identified only by a data-test
+    attribute, with no visible text at all) can never be resolved by matching a step's own wording,
+    and a flow-wide selector pool doesn't work either: a persistent nav element like the cart icon is
+    visible on every subsequent page and would win — wrongly — for every later step too. step_selectors
+    is aligned 1:1 with steps; an empty list at an index means "no click here" (a fill/assert step)."""
+    hops = surface.get("action_chain_hops") or []
+    steps, step_selectors = [], []
+    for i, hop in enumerate(hops):
+        label = (_ACTION_CHAIN_STEP_LABELS[i] if i < len(_ACTION_CHAIN_STEP_LABELS)
+                 else f"Continue to the next step ({i + 1})")
+        steps.append(label)
+        step_selectors.append([hop["selector"]])
+        if hop.get("has_form"):
+            steps.append("Fill required checkout details")
+            step_selectors.append([])
+    steps.append("Assert order confirmation is shown")
+    step_selectors.append([])
+    return steps, step_selectors
+
+
+_NAV_LIKE_TEXT_RE = re.compile(
+    r"^(home|about|contact|blog|privacy|terms|sign ?in|log ?in|sign ?up|register|cart|search|menu)$", re.I)
+
+
+def _primary_cta_candidate(pages):
+    """Finds a real, clickable primary call-to-action on the homepage — actual text plus (where
+    available) a real id/data-testid selector — instead of inventing a placeholder like "primary
+    CTA" that can never resolve against a real DOM. Returns (text, selector), or None if EXPLORE
+    didn't discover anything usable, so the caller can skip the flow rather than emit an
+    unresolvable step."""
+    home = pages[0] if pages else None
+    if not home:
+        return None
+    for bs in home.get("button_selectors", []):
+        text = (bs.get("text") or "").strip()
+        if text and not _NAV_LIKE_TEXT_RE.match(text):
+            sel = bs["selector"]
+            return text, f'[data-testid="{sel}"], [data-test="{sel}"], #{sel}'
+    for b in home.get("buttons", []):
+        b = (b or "").strip()
+        if b and not _NAV_LIKE_TEXT_RE.match(b):
+            return b, f"getByRole('button', {{ name: /{re.escape(b)}/i }})"
+    for l in home.get("links", []):
+        text = (l.get("text") or "").strip()
+        if text and not _NAV_LIKE_TEXT_RE.match(text):
+            return text, f"getByRole('link', {{ name: /{re.escape(text)}/i }})"
+    return None
+
+
 def _fallback_flows(surface):
     """Deterministic plan used when the LLM is unavailable. Derived from what EXPLORE actually
     found (discovered pages/forms) rather than a fixed generic template, so an offline demo still
     visibly reflects the real target instead of always producing the same three canned flows."""
     pages = surface.get("pages", [])
     forms = surface.get("forms", [])
+    action_pages = [p for p in pages if p.get("discovered_via") == "action_chain"]
     home_title = (pages[0].get("title") if pages else "") or ""
     flows = [
         {"flow_id": "F1", "name": "Homepage loads and primary nav renders", "type": "happy", "priority": "high",
@@ -704,6 +798,17 @@ def _fallback_flows(surface):
             "expected_outcome": f"{path} renders without a navigation error", "selectors": [],
         })
 
+    if action_pages:
+        n = len(flows) + 1
+        chain_paths = [urlparse(p["url"]).path or p["url"] for p in action_pages]
+        steps, step_selectors = _action_chain_flow_steps(surface)
+        flows.append({
+            "flow_id": f"F{n}", "name": "Add item to cart and complete checkout", "type": "happy",
+            "priority": "high", "steps": steps, "step_selectors": step_selectors,
+            "expected_outcome": f"User can purchase an item end-to-end through {' -> '.join(chain_paths)}",
+            "selectors": [],
+        })
+
     if forms:
         n = len(flows) + 1
         flows.append({
@@ -717,13 +822,20 @@ def _fallback_flows(surface):
             "expected_outcome": "Validation errors displayed", "selectors": ["getByText('required')"],
         })
     else:
-        # no discovered forms — still cover a generic primary interactive element as a happy path
-        n = len(flows) + 1
-        flows.append({
-            "flow_id": f"F{n}", "name": "Primary call-to-action navigation", "type": "happy", "priority": "medium",
-            "steps": ["Click primary CTA", "Assert URL changed", "Assert target section visible"],
-            "expected_outcome": "User reaches target page", "selectors": ["getByRole('button')"],
-        })
+        # no discovered forms — cover a primary interactive element as a happy path, but only if
+        # EXPLORE actually found a real one. A vague, unresolvable step like "Click primary CTA"
+        # is guaranteed to fail against any real page, so ground it in real discovered text/selector
+        # or skip the flow entirely rather than emit a step that can never succeed.
+        cta = _primary_cta_candidate(pages)
+        if cta:
+            text, selector = cta
+            n = len(flows) + 1
+            flows.append({
+                "flow_id": f"F{n}", "name": f"Primary call-to-action: {text}", "type": "happy",
+                "priority": "medium", "steps": [f"Click '{text}'", "Assert URL changed"],
+                "expected_outcome": f"Clicking '{text}' navigates the user to the target page",
+                "selectors": [selector],
+            })
 
     n = len(flows) + 1
     flows.append({
@@ -732,6 +844,35 @@ def _fallback_flows(surface):
         "expected_outcome": "Graceful not-found page", "selectors": ["getByText('not found')"],
     })
     return flows
+
+
+def _ensure_action_chain_coverage(surface, flows, data):
+    """Mutates `data` in place: if EXPLORE's action-chain walk (pw_engine._discover_action_chain)
+    found screens only reachable via a button click — the hallmark of a cart/checkout funnel — and
+    no flow (existing or already queued by the LLM evaluator) exercises them, force one in. Runs
+    unconditionally after either the LLM or heuristic audit, so "end-to-end" coverage never depends
+    on the LLM happening to prioritize it among everything else it could plan."""
+    action_pages = [p for p in surface.get("pages", []) if p.get("discovered_via") == "action_chain"]
+    if not action_pages:
+        return
+    already_added = data.setdefault("added_flows", [])
+    flow_text = " ".join((f.get("name", "") + " " + " ".join(f.get("steps", []) or []))
+                         for f in list(flows) + list(already_added)).lower()
+    if any(k in flow_text for k in ("cart", "checkout")):
+        return
+    chain_paths = [urlparse(p["url"]).path or p["url"] for p in action_pages]
+    steps, step_selectors = _action_chain_flow_steps(surface)
+    data.setdefault("coverage_gaps", []).append({
+        "area": "Cart & checkout", "severity": "high",
+        "detail": f"Exploration found {len(action_pages)} screen(s) only reachable by clicking a "
+                  f"button (not a link) — {', '.join(chain_paths)} — but no flow in the plan "
+                  "exercises the cart/checkout funnel."})
+    already_added.append({
+        "name": "Add item to cart and complete checkout", "type": "happy", "priority": "high",
+        "steps": steps, "step_selectors": step_selectors,
+        "expected_outcome": f"User can purchase an item end-to-end through {' -> '.join(chain_paths)}",
+        "selectors": [],
+    })
 
 
 PRD_FLOW_KEYWORDS = ["login", "log in", "logout", "sign up", "signup", "register", "checkout",

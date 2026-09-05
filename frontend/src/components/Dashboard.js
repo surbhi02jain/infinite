@@ -8,6 +8,7 @@ import RunsSidebar from "@/components/RunsSidebar";
 import PipelineDAG from "@/components/PipelineDAG";
 import EventConsole from "@/components/EventConsole";
 import WorkspaceTabs from "@/components/WorkspaceTabs";
+import ReviewCallout from "@/components/ReviewCallout";
 import { Button } from "@/components/ui/button";
 
 export default function Dashboard() {
@@ -156,6 +157,7 @@ export default function Dashboard() {
               <PipelineDAG stageStatus={derived.stageStatus} stageDuration={derived.stageDuration}
                 run={run} awaiting={derived.awaiting} onResume={resume}
                 activeTab={activeTab} onStageClick={setActiveTab} />
+              <ReviewCallout items={derived.needsReview} onJump={() => setActiveTab("heal")} />
               <div className="flex-1 flex overflow-hidden">
                 <div className="flex-1 overflow-hidden flex flex-col border-r border-slate-800/80">
                   <WorkspaceTabs derived={derived} runId={activeRunId} run={run}

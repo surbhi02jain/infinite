@@ -72,5 +72,6 @@ export function deriveState(events) {
     specs: Object.values(specsMap),
     executions: Object.values(execMap),
     healer, report, awaiting, complete,
+    needsReview: healer.filter((a) => a.decision === "review"),
   };
 }

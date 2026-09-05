@@ -9,6 +9,7 @@ import FinalReport from "@/components/FinalReport";
 
 export default function WorkspaceTabs({ derived, runId, run, activeTab, onTabChange }) {
   const badge = (n) => n > 0 ? <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-slate-700/60 text-[9px] font-mono">{n}</span> : null;
+  const reviewCount = derived.needsReview?.length || 0;
   return (
     <Tabs value={activeTab} onValueChange={onTabChange} className="flex-1 flex flex-col overflow-hidden">
       <TabsList className="h-11 justify-start bg-[#0b101c] border-b border-slate-800/80 rounded-none px-3 gap-1 shrink-0 w-full">
@@ -25,7 +26,12 @@ export default function WorkspaceTabs({ derived, runId, run, activeTab, onTabCha
           <PlayCircle className="w-3.5 h-3.5 mr-1.5" /> Runner {badge(derived.executions.length)}
         </TabsTrigger>
         <TabsTrigger data-testid="healer-log-tab-trigger" value="heal" className="data-[state=active]:bg-slate-800 data-[state=active]:text-white text-slate-400 text-xs">
-          <Wrench className="w-3.5 h-3.5 mr-1.5" /> Healer {badge(derived.healer.length)}
+          <Wrench className="w-3.5 h-3.5 mr-1.5" /> Healer
+          {reviewCount > 0 ? (
+            <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 text-[9px] font-mono animate-pulse">
+              {reviewCount} review
+            </span>
+          ) : badge(derived.healer.length)}
         </TabsTrigger>
         <TabsTrigger data-testid="final-report-tab-trigger" value="report" className="data-[state=active]:bg-slate-800 data-[state=active]:text-white text-slate-400 text-xs">
           <FileBarChart className="w-3.5 h-3.5 mr-1.5" /> Report
