@@ -25,6 +25,14 @@ DUMMY_VALUES = {
     "search": "test",
 }
 
+# only messages that actually look like an uncaught runtime exception count as a real JS-exception
+# signal — Chrome's console "error" level also covers mixed-content warnings, resource-load failures,
+# deprecated-API notices etc., none of which mean the app is broken.
+_JS_EXCEPTION_RE = re.compile(
+    r"uncaught|unhandled (promise )?rejection|typeerror|referenceerror|syntaxerror|rangeerror|"
+    r"is not a function|is not defined|cannot read propert",
+    re.I)
+
 
 def _slug(s):
     return re.sub(r"[^a-z0-9]+", "-", (s or "flow").lower()).strip("-")[:40] or "flow"
@@ -401,11 +409,14 @@ async def run_flow_pw(run_id, browser, storage_state_path, config, flow, spec, o
     page = await context.new_page()
 
     console_errors, network_errors = [], []
-    # "Failed to load resource" is Chrome logging a non-2xx network response as a console error —
-    # it's expected noise on negative-path tests (e.g. a 404 flow) and is already tracked separately
-    # via the response listener below, so it shouldn't itself count as a JS exception signal.
+    # Chrome's console "error" level covers a lot of benign advisory noise that has nothing to do
+    # with the app being broken — mixed-content warnings, resource-load failures (tracked separately
+    # via the response listener), deprecated-API notices, CSP reports. Only messages that actually
+    # look like an uncaught runtime exception count as a real JS-exception signal here; page.on
+    # "pageerror" is exempt from the filter since it inherently only fires for genuine uncaught
+    # exceptions/unhandled rejections, never console.error() calls or resource issues.
     page.on("console", lambda m: console_errors.append(m.text[:200])
-            if m.type == "error" and "Failed to load resource" not in m.text else None)
+            if m.type == "error" and _JS_EXCEPTION_RE.search(m.text) else None)
     page.on("pageerror", lambda e: console_errors.append(str(e)[:200]))
     page.on("response", lambda r: network_errors.append({"url": r.url, "status": r.status}) if r.status >= 500 else None)
 

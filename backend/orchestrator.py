@@ -53,7 +53,15 @@ async def llm_json(system: str, prompt: str, model: str = DEFAULT_MODEL, session
                 "reasoning_effort": "low",
             },
         )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            # surface Sarvam's actual error body (e.g. "No credits available.") instead of a bare
+            # HTTP status line — that's the difference between a self-diagnosable message in the
+            # Decision Stream and a cryptic one that needs a manual API call to explain.
+            try:
+                detail = resp.json().get("error", {}).get("message") or resp.text[:200]
+            except Exception:
+                detail = resp.text[:200]
+            raise RuntimeError(f"Sarvam API error {resp.status_code}: {detail}")
         text = resp.json()["choices"][0]["message"]["content"]
     return _extract_json(text), text
 
