@@ -1,15 +1,18 @@
 import { useState, useEffect } from "react";
-import { Copy, CheckCircle2, FileCode, ShieldCheck, ShieldAlert } from "lucide-react";
+import { Copy, CheckCircle2, FileCode, ShieldCheck, ShieldAlert, Download, Info } from "lucide-react";
 import { toast } from "sonner";
 import { Empty } from "@/components/TestPlanView";
+import { ARTIFACT_BASE } from "@/api";
 
 const TYPE_DOT = { happy: "bg-emerald-400", edge: "bg-cyan-400", error: "bg-rose-400" };
 
-export default function CodeViewer({ specs }) {
+export default function CodeViewer({ specs, runId, run }) {
   const [active, setActive] = useState(0);
   useEffect(() => { if (active >= specs.length) setActive(0); }, [specs.length, active]);
   if (!specs.length) return <Empty text="Generated Playwright specs will appear here…" />;
   const spec = specs[Math.min(active, specs.length - 1)];
+  const needsStorageState = /storageState/.test(spec.code || "");
+  const storageStateUrl = runId ? `${ARTIFACT_BASE}/artifacts/${runId}/storageState.json` : null;
 
   const copy = async () => {
     try {
@@ -71,6 +74,20 @@ export default function CodeViewer({ specs }) {
             className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-emerald-400 transition-colors font-mono">
             <Copy className="w-3.5 h-3.5" /> Copy
           </button>
+        </div>
+        <div className="shrink-0 border-b border-slate-800/80 bg-[#0d131f] px-4 py-2 flex flex-col gap-1.5">
+          <div className="flex items-start gap-2 text-[11px] text-slate-500">
+            <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+            <span>Portable starting point for your own suite — the <b className="text-slate-400">Runner</b> tab shows the
+              actual locators, screenshots and pass/fail from the real live-browser execution, which drives its own
+              interpreter rather than this file.</span>
+          </div>
+          {needsStorageState && (
+            <a href={storageStateUrl} download="storageState.json" data-testid="download-storage-state-link"
+              className="flex items-center gap-1.5 text-[11px] text-amber-300 hover:text-amber-200 w-fit">
+              <Download className="w-3 h-3" /> This spec references storageState.json — download it here to run standalone
+            </a>
+          )}
         </div>
         <div className="flex-1 overflow-auto">
           <pre data-testid="code-content" className="p-4 font-mono text-[12px] leading-relaxed"><code dangerouslySetInnerHTML={{ __html: highlight(spec.code) }} /></pre>

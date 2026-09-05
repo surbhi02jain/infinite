@@ -17,7 +17,9 @@ export default function EventConsole({ events, live }) {
   const [filter, setFilter] = useState("all");
   const [autoScroll, setAutoScroll] = useState(true);
   const [cleared, setCleared] = useState(0);
-  const [collapsed, setCollapsed] = useState(false);
+  // narrow/tablet screens can't fit both side panels + the workspace at once — start collapsed
+  // there so the main content is usable; desktop keeps its normal default (open).
+  const [collapsed, setCollapsed] = useState(() => typeof window !== "undefined" && window.innerWidth < 1024);
   const endRef = useRef(null);
 
   const visible = events.filter((e, i) => i >= cleared && (filter === "all" || e.stage === filter || e.level === filter));

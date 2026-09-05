@@ -41,7 +41,7 @@ def build_html_report(run: dict, report: dict, origin: str = "") -> str:
     defect_cards = "".join(_defect_card(d, exec_by_id, origin) for d in defects) or _empty("No genuine application defects flagged — nice work.")
     healer_cards = "".join(_healer_card(a) for a in healer) or _empty("No self-heal actions were needed this run.")
     gap_cards = "".join(_gap_card(g) for g in gaps) or _empty("No coverage gaps identified.")
-    prd_items = "".join(f'<li>{_esc(g)}</li>' for g in prd_gaps) or f'<li class="muted">No PRD requirements missed by the plan.</li>'
+    prd_items = "".join(f'<li>{_esc(g)}</li>' for g in prd_gaps) or '<li class="muted">No PRD requirements missed by the plan.</li>'
     exec_cards = "".join(_exec_card(e, origin) for e in execs) or _empty("No executions recorded.")
 
     return f"""<!doctype html><html><head><meta charset="utf-8">

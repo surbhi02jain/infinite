@@ -21,7 +21,7 @@ load_dotenv(ROOT_DIR / '.env')
 sys.path.insert(0, str(ROOT_DIR))
 
 from event_bus import bus
-from orchestrator import Orchestrator, _resume_events, STAGES
+from orchestrator import Orchestrator, _resume_events, STAGES, defaultdict_seq
 from report_export import build_html_report
 from pw_engine import ARTIFACTS_ROOT
 
@@ -39,6 +39,11 @@ logger = logging.getLogger(__name__)
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+class HealerResolution(BaseModel):
+    resolution: str  # "defect" | "dismissed"
+    note: Optional[str] = None
 
 
 class RunConfig(BaseModel):
@@ -112,6 +117,72 @@ async def resume_run(run_id: str):
         ev.set()
         return {"resumed": True}
     raise HTTPException(400, "Run is not awaiting approval.")
+
+
+@api_router.post("/runs/{run_id}/healer-actions/{action_id}/resolve")
+async def resolve_healer_action(run_id: str, action_id: str, body: HealerResolution):
+    """Human-in-the-loop resolution for a healer_action the pipeline left as NEEDS REVIEW — the
+    Healer only auto-decides script-fix (verified by live replay) or genuine defect; anything
+    ambiguous (an unclear assertion failure, or a proposed fix that didn't verify) is left for a
+    person to call, and this is that call: escalate it to a real defect, or dismiss it as fine."""
+    if body.resolution not in ("defect", "dismissed"):
+        raise HTTPException(400, "resolution must be 'defect' or 'dismissed'")
+    action = await db.healer_actions.find_one({"id": action_id, "run_id": run_id}, {"_id": 0})
+    if not action:
+        raise HTTPException(404, "Healer action not found")
+    if action.get("decision") != "review":
+        raise HTTPException(400, "Only actions still marked NEEDS REVIEW can be resolved")
+
+    new_decision = "defect" if body.resolution == "defect" else "dismissed"
+    await db.healer_actions.update_one({"id": action_id}, {"$set": {
+        "decision": new_decision, "resolved_by": "operator", "resolved_note": body.note,
+        "resolved_at": now_iso()}})
+
+    final_status = "defect" if body.resolution == "defect" else "resolved"
+    await db.executions.update_one({"id": action["execution_id"]}, {"$set": {"final_status": final_status}})
+
+    if body.resolution == "defect":
+        defect = {"id": str(uuid.uuid4()), "run_id": run_id, "flow_id": action["flow_id"],
+                  "flow_name": action["flow_name"], "fail_type": action.get("fail_type"),
+                  "confidence": 1.0, "severity": action.get("severity") or "medium",
+                  "rationale": "Manually escalated by operator" + (f": {body.note}" if body.note else "")}
+        await db.defects.insert_one(dict(defect))
+
+    # recompute the persisted report's summary so the Report tab and HTML/JSON export stay
+    # consistent with this decision, using the same formula _stage_report uses
+    report = await db.reports.find_one({"run_id": run_id}, {"_id": 0})
+    summary_patch, defects_list = {}, []
+    if report:
+        finals = await db.executions.find({"run_id": run_id}, {"_id": 0}).to_list(1000)
+        total = len(finals)
+        passed = sum(1 for e in finals if e["final_status"] == "passed")
+        healed = sum(1 for e in finals if e["final_status"] == "healed")
+        review = sum(1 for e in finals if e["final_status"] == "review")
+        defects_list = await db.defects.find({"run_id": run_id}, {"_id": 0}).to_list(1000)
+        pass_rate = round(100 * (passed + healed) / max(1, total))
+        gaps = report.get("coverage_gaps", [])
+        high_gaps = sum(1 for g in gaps if str(g.get("severity")).lower() == "high")
+        risk_index = min(100, len(gaps) * 8 + high_gaps * 10 + len(defects_list) * 6 + review * 5)
+        summary_patch = {"passed": passed, "healed": healed, "defects": len(defects_list),
+                         "needs_review": review, "pass_rate": pass_rate, "untested_risk_index": risk_index}
+        healer_actions = await db.healer_actions.find({"run_id": run_id}, {"_id": 0}).to_list(1000)
+        await db.reports.update_one({"run_id": run_id}, {"$set": {
+            **{f"summary.{k}": v for k, v in summary_patch.items()},
+            "defects": defects_list, "healer_actions": healer_actions}})
+
+    # continue the run's own event sequence (it was released when the run finished) so this new
+    # event doesn't collide with the run's historical seq numbers
+    last = await db.events.find({"run_id": run_id}, {"_id": 0, "seq": 1}).sort("seq", -1).limit(1).to_list(1)
+    defaultdict_seq[run_id] = last[0]["seq"] if last else 0
+    label = "APP DEFECT" if body.resolution == "defect" else "dismissed as a false positive"
+    ev = await orch.emit(run_id, "HEAL", "healer", "error" if body.resolution == "defect" else "info",
+                         "healer_action_resolved",
+                         f"{action['flow_name']}: operator resolved NEEDS REVIEW -> {label}"
+                         + (f" ({body.note})" if body.note else ""),
+                         {"action_id": action_id, "flow_id": action["flow_id"], "execution_id": action["execution_id"],
+                          "resolution": body.resolution, "summary_patch": summary_patch, "defects": defects_list})
+    defaultdict_seq.pop(run_id, None)
+    return ev
 
 
 @api_router.get("/runs/{run_id}/stream")

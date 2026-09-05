@@ -12,7 +12,9 @@ const STATUS_STYLE = {
 };
 
 export default function RunsSidebar({ runs, activeRunId, onSelect }) {
-  const [collapsed, setCollapsed] = useState(false);
+  // narrow/tablet screens can't fit both side panels + the workspace at once — start collapsed
+  // there so the main content is usable; desktop keeps its normal default (open).
+  const [collapsed, setCollapsed] = useState(() => typeof window !== "undefined" && window.innerWidth < 1024);
 
   if (collapsed) {
     return (

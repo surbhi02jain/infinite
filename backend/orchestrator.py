@@ -692,20 +692,27 @@ ROBUST_PATTERNS = re.compile(
     r"\b(a|nav|main|form|input|button|h1|h2|header|footer|section|body)\b", re.I)
 
 
-_ID_OR_TESTID_RE = re.compile(r"#([\w\-]+)|data-testid=[\"']?([\w\-]+)")
+_ID_RE = re.compile(r"#([\w\-]+)")
+_TESTID_RE = re.compile(r"data-testid=[\"']?([\w\-]+)")
 
 
 def _selector_valid(sel, known):
     s = sel.lower()
     # an #id or [data-testid=...] is a specific, falsifiable claim about the DOM, so it must actually
-    # match a real discovered identifier — not just get waved through because the selector also
-    # contains a generic tag-name word (e.g. "button#add_element_button" starts with the literal
-    # word "button", which used to satisfy ROBUST_PATTERNS below regardless of whether the id was
-    # ever seen on the real page, letting the LLM's hallucinated ids pass as "verified").
-    id_m = _ID_OR_TESTID_RE.search(sel)
+    # match a real discovered identifier of the SAME kind — not just get waved through because the
+    # selector also contains a generic tag-name word (e.g. "button#add_element_button" starts with
+    # the literal word "button", which used to satisfy ROBUST_PATTERNS below regardless of whether
+    # the id was ever seen on the real page), and not by matching a known id against a *different*
+    # kind of claim (e.g. a hallucinated [data-testid="user-name"] "verifying" only because a real
+    # #user-name id happens to share that identifier text — different attribute, still fabricated).
+    testid_m = _TESTID_RE.search(sel)
+    if testid_m:
+        ident = testid_m.group(1).lower()
+        return any(ident in k.lower() for k in known if "data-testid=" in k.lower())
+    id_m = _ID_RE.search(sel)
     if id_m:
-        ident = (id_m.group(1) or id_m.group(2) or "").lower()
-        return bool(ident) and any(ident in k.lower() for k in known)
+        ident = id_m.group(1).lower()
+        return any(ident in k.lower() for k in known if k.lower().lstrip().startswith("#"))
     if any(k.lower() in s or s in k.lower() for k in known):
         return True
     return bool(ROBUST_PATTERNS.search(s))
@@ -929,15 +936,94 @@ def _fallback_evaluation(surface, flows, prd):
             "risk_notes": risk_notes, "missing_edge_cases": []}
 
 
+_SPEC_QUOTED_RE = re.compile(r"'([^']*)'|\"([^\"]*)\"")
+_SPEC_STOPWORDS_RE = re.compile(
+    r"^(click|select|choose|tap|press|enter|fill|type|assert|verify|check|navigate to|go to|visit|open|"
+    r"the|a|an|and|then|on|to|into)\s+", re.I)
+
+
+def _spec_keywords(step: str) -> str:
+    """Extracts a short UI-label-shaped phrase for a getByRole/getByText name regex — e.g. "Click
+    the 'Add to Cart' button for the item" -> "Add to Cart". Drops any parenthetical first (usually
+    an example/aside like "(e.g., 'Sauce Labs Backpack')", not the real label) before even looking
+    for a quoted literal, then cuts at the first comma and caps length — the raw remainder of a
+    verbose step sentence makes an unmatchable regex rather than a real button/link name."""
+    step = re.sub(r"\([^)]*\)", "", step)  # drop parentheticals before anything else
+    m = _SPEC_QUOTED_RE.search(step)
+    if m:
+        lit = m.group(1) if m.group(1) is not None else m.group(2)
+        if lit and lit.strip():
+            return re.escape(lit.strip()[:40])
+    t = step.split(",")[0]  # drop trailing aside
+    t = re.sub(r"\b(button|link|field|element|page)\b", "", t, flags=re.I).strip()
+    prev = None
+    while prev != t:
+        prev = t
+        t = _SPEC_STOPWORDS_RE.sub("", t.strip())
+    words = (t.strip() or step.strip()).split()[:4]  # keep it label-shaped, not a full sentence
+    phrase = " ".join(words).strip(" -_.:;,")  # e.g. "login-" (hyphen left by stripping "button"
+    return re.escape(phrase)[:40] or "submit"  # off "login-button") would fail to match a real "Login"
+
+
+def _step_to_pw_line(step: str) -> str:
+    """Best-effort translation of one plain-English plan step into a real, executable Playwright
+    action — mirroring the same category rules pw_engine._execute_step uses live, so a fallback spec
+    (used when the LLM's own code-gen call degrades) is a genuine starting point instead of a bare
+    comment. The live Runner still drives the browser via its own interpreter (see the Runner tab for
+    the actual resolved locators and results) — this is a portable, standalone approximation of that,
+    not a byte-for-byte replay."""
+    t = step.lower()
+    m = _SPEC_QUOTED_RE.search(step)
+    literal = (m.group(1) if m and m.group(1) is not None else (m.group(2) if m else None))
+    literal_js = literal.replace("\\", "\\\\").replace("'", "\\'") if literal else None
+    kw = _spec_keywords(step)
+    is_click_verb = t.strip().startswith(("click", "select", "choose", "tap", "press"))
+
+    if not is_click_verb and any(k in t for k in ("navigate", "go to", "visit", "open")):
+        path_m = re.search(r"(https?://\S+|/[\w\-/.]+)", step)
+        target = path_m.group(1) if path_m else "/"
+        return f"  await page.goto('{target}');"
+    if not is_click_verb and "password" in t:
+        val = literal_js or "Test-Password-1!"
+        return f"  await page.locator('input[type=\"password\"]').first.fill('{val}');"
+    if not is_click_verb and any(k in t for k in ("username", "user name", "email", "login")):
+        val = literal_js or "testuser"
+        return f"  await page.locator('input[type=\"text\"], input[type=\"email\"]').first.fill('{val}');"
+    if not is_click_verb and any(k in t for k in ("fill", "enter", "type", "input")):
+        val = literal_js or "test value"
+        return f"  await page.locator('input:not([type=\"password\"]), textarea').first.fill('{val}');"
+    if t.strip().startswith(("assert", "verify")) or (not is_click_verb and "assert" in t):
+        if literal_js:
+            return f"  await expect(page.getByText('{literal_js}', {{ exact: false }})).toBeVisible();"
+        return f"  await expect(page.getByText(/{kw}/i).first).toBeVisible();"
+    if is_click_verb or any(k in t for k in ("submit", "proceed", "continue", "checkout", "confirm", "add")):
+        return (f"  await page.getByRole('button', {{ name: /{kw}/i }})"
+                f".or(page.getByRole('link', {{ name: /{kw}/i }})).first.click();")
+    return f"  // (informational step, no direct action)"
+
+
 def _fallback_spec(flow, url):
-    steps = "\n".join(f"    // {s}" for s in flow.get("steps", []))
+    steps = flow.get("steps") or []
+    lines = []
+    goto_emitted = True  # the test body below always opens with an unconditional goto(url) already
+    for s in steps:
+        line = _step_to_pw_line(s)
+        # skip a redundant repeat of the same initial navigation the test already opens with
+        if line.strip() == f"await page.goto('{url}');" and goto_emitted:
+            continue
+        if line.strip().startswith("await page.goto("):
+            goto_emitted = True
+        lines.append(f"  // {s}\n{line}")
+    body = "\n".join(lines)
     return (f"""import {{ test, expect }} from '@playwright/test';
 
+// Auto-translated from the plan's natural-language steps (LLM code generation was unavailable for
+// this flow). The live Runner drives the browser via its own step interpreter — see the Runner tab
+// for the actual resolved locators, screenshots and pass/fail from the real run. This file is a
+// portable, standalone approximation for your own suite, not a byte-for-byte replay of that run.
 test('{flow['name']}', async ({{ page }}) => {{
   await page.goto('{url}');
-{steps}
-  await expect(page).toHaveTitle(/.+/);
-  await expect(page.getByRole('main')).toBeVisible();
+{body}
 }});
 """)
 
