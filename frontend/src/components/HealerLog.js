@@ -1,14 +1,59 @@
-import { Wrench, AlertOctagon, HelpCircle, ArrowRight } from "lucide-react";
+import { useState } from "react";
+import { Wrench, AlertOctagon, HelpCircle, CircleSlash, ArrowRight, Loader2 } from "lucide-react";
+import { toast } from "sonner";
+import { api } from "@/api";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Empty, SectionHeader } from "@/components/TestPlanView";
 
 const DECISION = {
   script: { icon: Wrench, cls: "text-amber-300 border-amber-500/30 bg-amber-950/30", label: "SCRIPT ISSUE · HEALED", bar: "bg-amber-400" },
   defect: { icon: AlertOctagon, cls: "text-rose-400 border-rose-500/30 bg-rose-950/30", label: "APP DEFECT", bar: "bg-rose-500" },
   review: { icon: HelpCircle, cls: "text-slate-300 border-slate-600 bg-slate-800/30", label: "NEEDS REVIEW", bar: "bg-slate-400" },
+  dismissed: { icon: CircleSlash, cls: "text-slate-500 border-slate-700 bg-slate-900/40", label: "DISMISSED", bar: "bg-slate-600" },
 };
 const SEV = { critical: "text-rose-300", high: "text-rose-300", medium: "text-amber-300", low: "text-slate-400" };
 
-export default function HealerLog({ healer }) {
+function ReviewActions({ action, runId, onEventAppend }) {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(null); // "defect" | "dismissed" | null
+
+  const resolve = async (resolution) => {
+    setBusy(resolution);
+    try {
+      const { data } = await api.post(`/runs/${runId}/healer-actions/${action.id}/resolve`,
+        { resolution, note: note.trim() || null });
+      onEventAppend?.(data);
+      toast.success(resolution === "defect" ? "Escalated to defect" : "Dismissed as false positive");
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Failed to resolve");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="mt-3 pt-3 border-t border-slate-800/70 flex items-center gap-2">
+      <Input data-testid={`healer-resolve-note-${action.flow_id}`} value={note} onChange={(e) => setNote(e.target.value)}
+        placeholder="Optional note (why?)" disabled={Boolean(busy)}
+        className="h-8 flex-1 bg-[#07090e] border-slate-700 text-[12px]" />
+      <Button data-testid={`healer-resolve-defect-${action.flow_id}`} size="sm" disabled={Boolean(busy)}
+        onClick={() => resolve("defect")}
+        className="h-8 bg-rose-500/15 border border-rose-500/40 text-rose-300 hover:bg-rose-500/25 text-[11px] font-mono">
+        {busy === "defect" ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <AlertOctagon className="w-3 h-3 mr-1" />}
+        Flag as Defect
+      </Button>
+      <Button data-testid={`healer-resolve-dismiss-${action.flow_id}`} size="sm" variant="outline" disabled={Boolean(busy)}
+        onClick={() => resolve("dismissed")}
+        className="h-8 border-slate-700 bg-[#0d131f] text-slate-300 hover:bg-slate-800 text-[11px] font-mono">
+        {busy === "dismissed" ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <CircleSlash className="w-3 h-3 mr-1" />}
+        Dismiss
+      </Button>
+    </div>
+  );
+}
+
+export default function HealerLog({ healer, runId, onEventAppend }) {
   if (!healer.length) return <Empty text="No failures yet — Healer decisions will stream here…" />;
   return (
     <div className="space-y-3 max-w-4xl">
@@ -54,6 +99,10 @@ export default function HealerLog({ healer }) {
               ) : (
                 <p className="mt-2 text-[12px] text-amber-300 font-mono">⚠ {a.result}</p>
               )
+            )}
+
+            {a.decision === "review" && runId && (
+              <ReviewActions action={a} runId={runId} onEventAppend={onEventAppend} />
             )}
           </div>
         );

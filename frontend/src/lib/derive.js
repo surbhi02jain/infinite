@@ -55,6 +55,15 @@ export function deriveState(events) {
           a.decision === "script" ? "healed" : a.decision === "defect" ? "defect" : "review";
         execMap[a.flow_id].healer = a;
       }
+    } else if (t === "healer_action_resolved" && e.data) {
+      const { action_id, flow_id, resolution, summary_patch, defects } = e.data;
+      const hIdx = healer.findIndex((a) => a.id === action_id);
+      if (hIdx !== -1) healer[hIdx] = { ...healer[hIdx], decision: resolution === "defect" ? "defect" : "dismissed" };
+      if (execMap[flow_id]) execMap[flow_id].final_status = resolution === "defect" ? "defect" : "resolved";
+      if (report && summary_patch && Object.keys(summary_patch).length) {
+        report = { ...report, summary: { ...report.summary, ...summary_patch },
+                  defects: defects !== undefined ? defects : report.defects };
+      }
     } else if (t === "report" && e.data?.report) {
       report = e.data.report;
     } else if (t === "run_complete") {

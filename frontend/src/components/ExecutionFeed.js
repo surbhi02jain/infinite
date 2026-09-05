@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CheckCircle2, XCircle, Wrench, HelpCircle, Cpu, Film, FileArchive, ChevronRight, ExternalLink } from "lucide-react";
+import { CheckCircle2, XCircle, Wrench, HelpCircle, CircleSlash, Cpu, Film, FileArchive, ChevronRight, ExternalLink } from "lucide-react";
 import { Empty, SectionHeader } from "@/components/TestPlanView";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { ARTIFACT_BASE } from "@/api";
@@ -9,6 +9,7 @@ const FINAL = {
   healed: { icon: Wrench, cls: "text-amber-300 border-amber-500/30 bg-amber-950/30", label: "HEALED" },
   defect: { icon: XCircle, cls: "text-rose-400 border-rose-500/30 bg-rose-950/30", label: "DEFECT" },
   review: { icon: HelpCircle, cls: "text-slate-300 border-slate-600 bg-slate-800/30", label: "REVIEW" },
+  resolved: { icon: CircleSlash, cls: "text-slate-500 border-slate-700 bg-slate-900/40", label: "DISMISSED" },
   failed: { icon: XCircle, cls: "text-rose-400 border-rose-500/30 bg-rose-950/30", label: "FAILED" },
 };
 
@@ -55,7 +56,15 @@ export default function ExecutionFeed({ executions }) {
                     {e.steps.map((s) => (
                       <li key={s.index} className="flex items-start gap-1.5 text-[11px] text-slate-400">
                         <ChevronRight className={`w-3 h-3 mt-0.5 shrink-0 ${s.ok ? "text-slate-600" : "text-rose-500"}`} />
-                        <span className={s.ok ? "" : "text-rose-300"}>{s.description}</span>
+                        <div className="min-w-0">
+                          <span className={s.ok ? "" : "text-rose-300"}>{s.description}</span>
+                          {s.locator && (
+                            <span className="ml-2 font-mono text-[10px] text-cyan-400/80" title="Resolved locator actually used for this step">
+                              → {s.locator}
+                            </span>
+                          )}
+                          {s.note && <div className="text-[10px] text-slate-500 mt-0.5">{s.note}</div>}
+                        </div>
                       </li>
                     ))}
                   </ol>

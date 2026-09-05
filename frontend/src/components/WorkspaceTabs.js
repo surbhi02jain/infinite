@@ -7,7 +7,7 @@ import ExecutionFeed from "@/components/ExecutionFeed";
 import HealerLog from "@/components/HealerLog";
 import FinalReport from "@/components/FinalReport";
 
-export default function WorkspaceTabs({ derived, runId, run, activeTab, onTabChange }) {
+export default function WorkspaceTabs({ derived, runId, run, activeTab, onTabChange, onEventAppend }) {
   const badge = (n) => n > 0 ? <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-slate-700/60 text-[9px] font-mono">{n}</span> : null;
   return (
     <Tabs value={activeTab} onValueChange={onTabChange} className="flex-1 flex flex-col overflow-hidden">
@@ -35,9 +35,9 @@ export default function WorkspaceTabs({ derived, runId, run, activeTab, onTabCha
       <div className="flex-1 overflow-y-auto">
         <TabsContent value="plan" className="mt-0 p-4 lg:p-6"><TestPlanView flows={derived.flows} /></TabsContent>
         <TabsContent value="eval" className="mt-0 p-4 lg:p-6"><PlanEvaluation gaps={derived.gaps} prdGaps={derived.prdGaps} riskNotes={derived.riskNotes} /></TabsContent>
-        <TabsContent value="code" className="mt-0 p-0 h-full"><CodeViewer specs={derived.specs} /></TabsContent>
+        <TabsContent value="code" className="mt-0 p-0 h-full"><CodeViewer specs={derived.specs} runId={runId} run={run} /></TabsContent>
         <TabsContent value="exec" className="mt-0 p-4 lg:p-6"><ExecutionFeed executions={derived.executions} /></TabsContent>
-        <TabsContent value="heal" className="mt-0 p-4 lg:p-6"><HealerLog healer={derived.healer} /></TabsContent>
+        <TabsContent value="heal" className="mt-0 p-4 lg:p-6"><HealerLog healer={derived.healer} runId={runId} onEventAppend={onEventAppend} /></TabsContent>
         <TabsContent value="report" className="mt-0 p-4 lg:p-6"><FinalReport report={derived.report} runId={runId} run={run} /></TabsContent>
       </div>
     </Tabs>

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { toast } from "sonner";
 import { Activity, Radio, Cpu, Zap } from "lucide-react";
-import { api, streamRun, STAGES } from "@/api";
+import { api, streamRun } from "@/api";
 import { deriveState } from "@/lib/derive";
 import RunForm from "@/components/RunForm";
 import RunsSidebar from "@/components/RunsSidebar";
@@ -159,7 +159,7 @@ export default function Dashboard() {
               <div className="flex-1 flex overflow-hidden">
                 <div className="flex-1 overflow-hidden flex flex-col border-r border-slate-800/80">
                   <WorkspaceTabs derived={derived} runId={activeRunId} run={run}
-                    activeTab={activeTab} onTabChange={setActiveTab} />
+                    activeTab={activeTab} onTabChange={setActiveTab} onEventAppend={pushEvent} />
                 </div>
                 <EventConsole events={events} live={live} />
               </div>
